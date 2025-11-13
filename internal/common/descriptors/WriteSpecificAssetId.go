@@ -44,13 +44,18 @@ func createSpecificAssetID(tx *sql.Tx, descriptorID int64, specificAssetIDs []mo
 	if len(specificAssetIDs) > 0 {
 		d := goqu.Dialect(dialect)
 		for _, val := range specificAssetIDs {
-			var a sql.NullInt64
 
-			externalSubjectReferenceID, err := persistence_utils.CreateReference(tx, val.ExternalSubjectID, a, a)
+			externalSubjectReferenceID, err := CreateSimpleReference(tx, val.ExternalSubjectID)
 			if err != nil {
 				return err
 			}
-			semanticID, err := persistence_utils.CreateReference(tx, val.SemanticID, a, a)
+
+			semanticID, err := PackReference(val.SemanticID)
+			if err != nil {
+				return err
+			}
+
+			SupplementalSemanticIds, err := PackReferences(val.SupplementalSemanticIds)
 			if err != nil {
 				return err
 			}
@@ -58,11 +63,12 @@ func createSpecificAssetID(tx *sql.Tx, descriptorID int64, specificAssetIDs []mo
 			sqlStr, args, err := d.
 				Insert(tblSpecificAssetID).
 				Rows(goqu.Record{
-					colDescriptorID:       descriptorID,
-					colSemanticID:         semanticID,
-					colName:               val.Name,
-					colValue:              val.Value,
-					colExternalSubjectRef: externalSubjectReferenceID,
+					colDescriptorID:             descriptorID,
+					colSemanticID:               semanticID,
+					colName:                     val.Name,
+					colValue:                    val.Value,
+					colExternalSubjectRef:       externalSubjectReferenceID,
+					"supplemental_semantic_ids": SupplementalSemanticIds,
 				}).
 				Returning(tSpecificAssetID.Col(colID)).
 				ToSQL()
@@ -74,9 +80,6 @@ func createSpecificAssetID(tx *sql.Tx, descriptorID int64, specificAssetIDs []mo
 				return err
 			}
 
-			if err = createSpecificAssetIDSupplementalSemantic(tx, id, val.SupplementalSemanticIds); err != nil {
-				return err
-			}
 		}
 	}
 	return nil

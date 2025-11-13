@@ -154,7 +154,27 @@ CREATE TABLE IF NOT EXISTS reference (
 CREATE INDEX IF NOT EXISTS ix_ref_parentref ON reference(parentReference);
 CREATE INDEX IF NOT EXISTS ix_ref_rootref ON reference(rootReference);
 
+CREATE TABLE IF NOT EXISTS reference_simple (
+  id                BIGSERIAL PRIMARY KEY,
+  type              reference_types NOT NULL,
+  referedReference  JSONB
+);
+
 CREATE INDEX IF NOT EXISTS ix_ref_id ON reference(id);
+CREATE INDEX IF NOT EXISTS ix_ref_simple_id ON reference_simple(id);
+
+
+CREATE TABLE IF NOT EXISTS reference_simple_key (
+  id           BIGSERIAL PRIMARY KEY,
+  reference_id BIGINT NOT NULL REFERENCES reference_simple(id) ON DELETE CASCADE,
+  position     INTEGER NOT NULL,                -- <- Array-Index keys[i]
+  type         key_type     NOT NULL,
+  value        TEXT     NOT NULL,
+  UNIQUE(reference_id, position)
+);
+
+CREATE INDEX IF NOT EXISTS ix_refsimpkey_type_val     ON reference_simple_key(type, value);
+CREATE INDEX IF NOT EXISTS ix_refsimpkey_val_trgm     ON reference_simple_key USING GIN (value gin_trgm_ops);
 
 CREATE TABLE IF NOT EXISTS reference_key (
   id           BIGSERIAL PRIMARY KEY,
@@ -164,9 +184,9 @@ CREATE TABLE IF NOT EXISTS reference_key (
   value        TEXT     NOT NULL,
   UNIQUE(reference_id, position)
 );
-
 CREATE INDEX IF NOT EXISTS ix_refkey_type_val     ON reference_key(type, value);
 CREATE INDEX IF NOT EXISTS ix_refkey_val_trgm     ON reference_key USING GIN (value gin_trgm_ops);
+
 
 CREATE TABLE IF NOT EXISTS lang_string_text_type_reference(
   id       BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY
@@ -659,10 +679,11 @@ CREATE TABLE IF NOT EXISTS descriptor_extension (
 CREATE TABLE IF NOT EXISTS specific_asset_id (
   id BIGSERIAL PRIMARY KEY,
   descriptor_id BIGINT NOT NULL REFERENCES descriptor(id) ON DELETE CASCADE,
-  semantic_id BIGINT REFERENCES reference(id),
+  semantic_id JSONB,
   name VARCHAR(64) NOT NULL,
   value VARCHAR(2048) NOT NULL,
-  external_subject_ref BIGINT REFERENCES reference(id)
+  external_subject_ref BIGINT REFERENCES reference_simple(id),
+  supplemental_semantic_ids JSONB
 );
 
 CREATE TABLE IF NOT EXISTS specific_asset_id_supplemental_semantic_id (

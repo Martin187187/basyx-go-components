@@ -483,7 +483,7 @@ func CreateReference(tx *sql.Tx, semanticID *gen.Reference, parentID sql.NullInt
 
 	insertKeyQuery := `INSERT INTO reference_key (reference_id, position, type, value) VALUES ($1, $2, $3, $4)`
 
-	if semanticID != nil && !isEmptyReference(*semanticID) {
+	if semanticID != nil && !IsEmptyReference(*semanticID) {
 		err := tx.QueryRow(`INSERT INTO reference (type, parentReference, rootReference) VALUES ($1, $2, $3) RETURNING id`, semanticID.Type, parentID, rootID).Scan(&id)
 		if err != nil {
 			return sql.NullInt64{}, err
@@ -510,7 +510,7 @@ func CreateReference(tx *sql.Tx, semanticID *gen.Reference, parentID sql.NullInt
 func insertNestedRefferedSemanticIDs(semanticID *gen.Reference, tx *sql.Tx, referenceID sql.NullInt64, insertKeyQuery string) (sql.NullInt64, error) {
 	stack := make([]*gen.Reference, 0)
 	rootID := referenceID
-	if semanticID.ReferredSemanticID != nil && !isEmptyReference(*semanticID.ReferredSemanticID) {
+	if semanticID.ReferredSemanticID != nil && !IsEmptyReference(*semanticID.ReferredSemanticID) {
 		stack = append(stack, semanticID.ReferredSemanticID)
 	}
 	for len(stack) > 0 {
@@ -540,7 +540,7 @@ func insertNestedRefferedSemanticIDs(semanticID *gen.Reference, tx *sql.Tx, refe
 			}
 		}
 
-		if current.ReferredSemanticID != nil && !isEmptyReference(*current.ReferredSemanticID) {
+		if current.ReferredSemanticID != nil && !IsEmptyReference(*current.ReferredSemanticID) {
 			stack = append(stack, current.ReferredSemanticID)
 		}
 
@@ -1019,6 +1019,6 @@ func InsertSupplementalSemanticIDsSME(tx *sql.Tx, smeID int64, supplementalSeman
 
 // isEmptyReference checks if a Reference is empty (zero value)
 
-func isEmptyReference(ref gen.Reference) bool {
+func IsEmptyReference(ref gen.Reference) bool {
 	return reflect.DeepEqual(ref, gen.Reference{})
 }
