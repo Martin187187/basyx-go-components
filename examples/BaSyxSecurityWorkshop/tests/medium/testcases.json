@@ -1,0 +1,38 @@
+[
+  {
+    "name": "admin can create descriptor",
+    "method": "POST",
+    "path": "/shell-descriptors",
+    "data": "examples/BaSyxSecurityWorkshop/tests/medium/postBody/simple_aas_medium.json",
+    "expectedStatus": 201,
+    "token": { "user": "admin", "password": "pwd" }
+  },
+  {
+    "name": "viewer can list descriptors",
+    "method": "GET",
+    "path": "/shell-descriptors",
+    "expectedStatus": 200,
+    "token": { "user": "usera", "password": "pwd" }
+  },
+  {
+    "name": "viewer can read created descriptor",
+    "method": "GET",
+    "path": "/shell-descriptors/aas-medium-1",
+    "expectedStatus": 200,
+    "token": { "user": "usera", "password": "pwd" }
+  },
+  {
+    "name": "viewer cannot delete descriptor",
+    "method": "DELETE",
+    "path": "/shell-descriptors/aas-medium-1",
+    "expectedStatus": 403,
+    "token": { "user": "usera", "password": "pwd" }
+  },
+  {
+    "name": "admin can delete descriptor",
+    "method": "DELETE",
+    "path": "/shell-descriptors/aas-medium-1",
+    "expectedStatus": 204,
+    "token": { "user": "admin", "password": "pwd" }
+  }
+]

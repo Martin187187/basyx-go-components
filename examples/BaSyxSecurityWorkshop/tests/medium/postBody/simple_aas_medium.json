@@ -1,0 +1,11 @@
+{
+  "id": "aas-medium-1",
+  "assetKind": "Instance",
+  "idShort": "MediumAAS",
+  "displayName": [
+    {
+      "language": "en-US",
+      "text": "Medium AAS"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+[
+  {
+    "name": "viewer can read shell descriptors",
+    "method": "GET",
+    "path": "/shell-descriptors",
+    "expectedStatus": 200,
+    "token": { "user": "usera", "password": "pwd" }
+  },
+  {
+    "name": "viewer cannot delete shell descriptors",
+    "method": "DELETE",
+    "path": "/shell-descriptors/abc",
+    "expectedStatus": 403,
+    "token": { "user": "usera", "password": "pwd" }
+  },
+  {
+    "name": "editor can update shell descriptor (may return 404 if missing)",
+    "method": "PUT",
+    "path": "/shell-descriptors/abc",
+    "data": "internal/aasregistry/security_tests/postBody/simple_aas_A.json",
+    "expectedStatus": 403,
+    "token": { "user": "userx", "password": "pwd" }
+  }
+]
