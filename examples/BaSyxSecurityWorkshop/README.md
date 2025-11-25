@@ -110,7 +110,7 @@ This rule gives read access to /route for everone.
           "attributes": [{ "GLOBAL": "ANONYMOUS" }]
         },
         "OBJECTS": [{ "ROUTE": "/route" }],
-        "FORMULA": { "$boolean: true" }
+        "FORMULA": { "$boolean": true }
       }
     ]
   }
@@ -121,7 +121,7 @@ This rule gives read access to /route for everone.
 ## 6. Easy Task (Business Case + How-To)
 
 **Business case:**  
-- allow read access for Shelldescriptor id: "http://martin.de" for everyone.
+- allow read access for Shelldescriptor Get by id: "http://martin.de" for everyone (not list endpoint).
 
 **What to change:**
 1. Open and edit `docker_compose/access_rules/access-rules.json`.
