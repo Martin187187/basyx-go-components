@@ -5,25 +5,17 @@
         "ACL": {
           "ACCESS": "ALLOW",
           "RIGHTS": [
-            "READ"
+            "READ",
+            "UPDATE"
           ]
         },
         "OBJECTS": [
           {
-            "ROUTE": "/shell-descriptors"
+            "DESCRIPTOR": "$aasdesc(\"*\")"
           }
         ],
         "FORMULA": {
-          "$not": {
-            "$eq": [
-              {
-                "$field": "$aasdesc#id"
-              },
-              {
-                "$strVal": "block-this"
-              }
-            ]
-          }
+          "$boolean": true
         }
       }
     ]
