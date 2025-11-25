@@ -49,9 +49,15 @@ func getAccessToken(tokenURL string, creds *tokenCreds) (string, error) {
 	if creds == nil {
 		return "", nil
 	}
+	clientID := getenvDefault("WORKSHOP_CLIENT_ID", "basyx-ui")
+	clientSecret := os.Getenv("WORKSHOP_CLIENT_SECRET")
+
 	form := url.Values{}
 	form.Set("grant_type", "password")
-	form.Set("client_id", "basyx-ui")
+	form.Set("client_id", clientID)
+	if clientSecret != "" {
+		form.Set("client_secret", clientSecret)
+	}
 	form.Set("username", creds.User)
 	form.Set("password", creds.Password)
 

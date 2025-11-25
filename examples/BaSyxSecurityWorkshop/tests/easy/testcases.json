@@ -1,17 +1,36 @@
 [
   {
-    "name": "viewer can read shell descriptors",
+    "name": "viewer can read shell descriptor",
+    "method": "GET",
+    "path": "/shell-descriptors/aHR0cDovL21hcnRpbi5kZQ",
+    "expectedStatus": 404,
+    "token": { "user": "admin", "password": "pwd" }
+  },
+  {
+    "name": "anonym can read shell descriptor",
+    "method": "GET",
+    "path": "/shell-descriptors/aHR0cDovL21hcnRpbi5kZQ",
+    "expectedStatus": 404
+  },
+  {
+    "name": "anonym can not read different shell descriptor",
+    "method": "GET",
+    "path": "/shell-descriptors/aHR0cDovL2tsby5kZQ",
+    "expectedStatus": 403
+  },
+  {
+    "name": "shell descriptors no access",
     "method": "GET",
     "path": "/shell-descriptors",
-    "expectedStatus": 200,
-    "token": { "user": "usera", "password": "pwd" }
+    "expectedStatus": 403,
+    "token": { "user": "admin", "password": "pwd" }
   },
   {
     "name": "viewer cannot delete shell descriptors",
     "method": "DELETE",
     "path": "/shell-descriptors/abc",
     "expectedStatus": 403,
-    "token": { "user": "usera", "password": "pwd" }
+    "token": { "user": "admin", "password": "pwd" }
   },
   {
     "name": "editor can update shell descriptor (may return 404 if missing)",
@@ -19,6 +38,6 @@
     "path": "/shell-descriptors/abc",
     "data": "internal/aasregistry/security_tests/postBody/simple_aas_A.json",
     "expectedStatus": 403,
-    "token": { "user": "userx", "password": "pwd" }
+    "token": { "user": "admin", "password": "pwd" }
   }
 ]

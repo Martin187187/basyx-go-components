@@ -3,9 +3,9 @@ package workshop
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,8 +93,14 @@ func TestWorkshopEasy(t *testing.T) {
 
 func fetchToken(t *testing.T, tokenURL, user, password string) string {
 	t.Helper()
-	reqBody := fmt.Sprintf("grant_type=password&client_id=basyx-ui&username=%s&password=%s", user, password)
-	req, err := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(reqBody))
+
+	form := url.Values{}
+	form.Set("grant_type", "password")
+	form.Set("client_id", "basyx-ui")
+	form.Set("username", user)
+	form.Set("password", password)
+
+	req, err := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		t.Fatalf("token req: %v", err)
 	}
