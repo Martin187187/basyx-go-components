@@ -37,30 +37,38 @@ This tutorial walks you through designing, applying, and testing Access Rule Mod
 ## 2. Repository Layout for the Workshop
 
 Key paths you will touch:
-- `examples/BaSyxSecurityWorkshop/docker_compose/access_rules/access-rules.json`  
-  The active model file mounted into the registry container (`/config/access_rules/access-rules.json`).
+- `examples/BaSyxSecurityWorkshop/access_rules/easy.json`  
+  Rule set for the easy track.
+- `examples/BaSyxSecurityWorkshop/access_rules/medium.json`  
+  Rule set for the medium track.
+- `examples/BaSyxSecurityWorkshop/access_rules/hard.json`  
+  Rule set for the hard track.
+- `examples/BaSyxSecurityWorkshop/access_rules/access-rules.json`  
+  The active rule file mounted into the single registry container (`/config/access_rules/access-rules.json`, port 6004). The runner copies the chosen track’s file here before each test run.
 
 ---
 
 ## 3. Prerequisites
 
 You need the following installed on your machine:
-1. **Podman or Docker** (compose plugin available). The instructions use `podman compose`, but you can replace it with `docker compose`.
-2. **Go toolchain** (to run the Go tests).
+1. **Podman or Docker** (compose plugin available). The commands below work with either; replace `docker` with `podman` if you prefer Podman.
+2. **No local Go toolchain needed.** Tests run inside the provided `workshop-test` container.
 
 ---
 
 ## 4. The Running Stack (Compose) and How to Start It
 
-What the compose stack contains:
+What the compose stack contains (single registry reused by all tracks):
 - **Postgres** on `localhost:5432` (db: `basyxTestDB`, user: `admin`, password: `admin123`).
 - **Keycloak** on `localhost:8080` with the imported realm `basyx`.
-- **AAS Registry** on `localhost:6004` that mounts your access rules from `docker_compose/access_rules/access-rules.json`.
+- **AAS Registry** on `localhost:6004` mounting `access_rules/access-rules.json` (the runner copies the selected track’s rules here before each test run).
+- **Test runner** container that executes the Go suites for you.
 
-Start the stack (from `examples/BaSyxSecurityWorkshop`):
+Start the stack once (from `examples/BaSyxSecurityWorkshop/server_secured`):
 ```
-docker compose up -d --build
+docker compose -f docker_compose.yml up -d --build
 ```
+Use `podman compose -f docker_compose.yml` instead of `docker compose -f docker_compose.yml` if you are on Podman.
 ---
 
 ## 5. Easy Task Foundations (Definitions + Examples)
@@ -124,8 +132,9 @@ This rule gives read access to /route for everone.
 - allow read access for Shelldescriptor Get by id: "http://martin.de" for everyone (not list endpoint).
 
 **What to change:**
-1. Open and edit `docker_compose/access_rules/access-rules.json`.
-2. Restart registry: `docker compose restart workshop_aas-registry-security`
+1. Open and edit `access_rules/easy.json`.
+2. Run the easy tests (this copies the rule into the active file and restarts the single registry if Docker/Podman is available inside the runner):  
+   `docker compose run --rm workshop-test easy`
 
 
 ## 7. Users, Credentials, and Claims (Keycloak Realm)
@@ -186,9 +195,32 @@ You can give access too descriptor or to descritpors with specific id:
 - Admins can CREATE, UPDATE, DELETE and READ all shell-descriptors
 
 **What to change:**
+1. Open and edit `access_rules/medium.json`.
+2. Run the medium tests:  
+   `docker compose run --rm workshop-test medium`
+
+---
+
+## 10. Hard Task (Integration Suite)
+
+For the hard track you reuse the full integration suite.
+
 **What to change:**
-1. Open and edit `docker_compose/access_rules/access-rules.json`.
-2. Restart registry: `docker compose restart workshop_aas-registry-security`
+1. Open and edit `access_rules/hard.json`.
+2. Run the hard tests (integration suite):  
+   `docker compose run --rm workshop-test hard`
+
+---
+
+## 12. Test Suites and How to Run Them
+
+- Start everything once (from `server_secured`): `docker compose up -d --build`  
+  (use `podman compose -f docker_compose.yml` on Podman).
+- Easy: `docker compose -f docker_compose.yml run --rm workshop-test easy`
+- Medium: `docker compose -f docker_compose.yml run --rm workshop-test medium`
+- Hard: `docker compose -f docker_compose.yml run --rm workshop-test hard`
+
+The runner copies the selected rule file into the active `access-rules.json`, restarts the registry (if Docker/Podman is available inside the runner), waits for health, and then executes the tests. If restart is not possible from inside the runner, restart the registry manually before running the command.
 
 ---
 

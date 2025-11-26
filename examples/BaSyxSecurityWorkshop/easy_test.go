@@ -48,7 +48,7 @@ func TestWorkshopEasy(t *testing.T) {
 	baseURL := getenvDefault("WORKSHOP_BASE_URL", "http://localhost:6004")
 	tokenURL := getenvDefault("WORKSHOP_TOKEN_URL", "http://localhost:8080/realms/basyx/protocol/openid-connect/token")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := httpClient()
 
 	for _, c := range cases {
 		c := c
