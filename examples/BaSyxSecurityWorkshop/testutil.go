@@ -186,13 +186,75 @@ func truncateDatabase(t *testing.T) {
 	}
 	defer rows.Close()
 
+	allowed := map[string]struct{}{
+		"reference":                       {},
+		"reference_key":                   {},
+		"lang_string_text_type_reference": {},
+		"lang_string_text_type":           {},
+		"lang_string_name_type_reference": {},
+		"lang_string_name_type":           {},
+		"administrative_information":      {},
+		"data_specification_content":      {},
+		"data_specification":              {},
+		"value_list":                      {},
+		"value_list_value_reference_pair": {},
+		"level_type":                      {},
+		"data_specification_iec61360":     {},
+		"administrative_information_embedded_data_specification": {},
+		"submodel":                                     {},
+		"submodel_supplemental_semantic_id":            {},
+		"extension":                                    {},
+		"submodel_extension":                           {},
+		"extension_supplemental_semantic_id":           {},
+		"extension_refers_to":                          {},
+		"submodel_element":                             {},
+		"submodel_element_supplemental_semantic_id":    {},
+		"submodel_element_extension":                   {},
+		"submodel_element_embedded_data_specification": {},
+		"property_element":                             {},
+		"multilanguage_property":                       {},
+		"multilanguage_property_value":                 {},
+		"blob_element":                                 {},
+		"file_element":                                 {},
+		"file_data":                                    {},
+		"range_element":                                {},
+		"reference_element":                            {},
+		"relationship_element":                         {},
+		"annotated_relationship_element":               {},
+		"submodel_element_collection":                  {},
+		"submodel_element_list":                        {},
+		"entity_element":                               {},
+		"entity_specific_asset_id":                     {},
+		"operation_element":                            {},
+		"operation_variable":                           {},
+		"basic_event_element":                          {},
+		"capability_element":                           {},
+		"qualifier":                                    {},
+		"submodel_element_qualifier":                   {},
+		"submodel_qualifier":                           {},
+		"qualifier_supplemental_semantic_id":           {},
+		"descriptor":                                   {},
+		"descriptor_extension":                         {},
+		"specific_asset_id":                            {},
+		"specific_asset_id_supplemental_semantic_id":   {},
+		"aas_descriptor_endpoint":                      {},
+		"security_attributes":                          {},
+		"endpoint_protocol_version":                    {},
+		"aas_descriptor":                               {},
+		"submodel_descriptor":                          {},
+		"submodel_descriptor_supplemental_semantic_id": {},
+		"submodel_embedded_data_specification":         {},
+	}
+
 	var tables []string
 	for rows.Next() {
 		var tn string
 		if err := rows.Scan(&tn); err != nil {
 			t.Fatalf("scan table: %v", err)
 		}
-		tables = append(tables, tn)
+		if _, ok := allowed[strings.ToLower(tn)]; ok {
+			tables = append(tables, tn)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("rows err: %v", err)
