@@ -2,24 +2,6 @@
 
 This tutorial walks you through designing, applying, and testing Access Rule Models for the AAS Registry. It is organized in three tracks (easy, medium, hard) and explains every step in detail so you can learn by doing. The document is intentionally verbose and self‑contained. If you already know a section, feel free to skim it.
 
----
-
-## Table of Contents
-1. Purpose and Learning Goals
-2. Repository Layout for the Workshop
-3. Prerequisites
-4. The Running Stack (Compose) and How to Start It
-5. Users, Credentials, and Claims (Keycloak Realm)
-6. Access Rule Model Basics
-7. Access Rule Materialization (Hard Track Concept)
-8. Editing and Applying Models
-9. Easy Track
-10. Medium Track
-11. Hard Track
-12. Test Suites and How to Run Them
-13. Troubleshooting and Tips
-14. FAQ
-15. Glossary
 
 ---
 
@@ -43,8 +25,6 @@ Key paths you will touch:
   Rule set for the medium track.
 - `examples/BaSyxSecurityWorkshop/access_rules/hard.json`  
   Rule set for the hard track.
-- `examples/BaSyxSecurityWorkshop/access_rules/access-rules.json`  
-  The active rule file mounted into the single registry container (`/config/access_rules/access-rules.json`, port 6004). The runner copies the chosen track’s file here before each test run.
 
 ---
 
@@ -54,21 +34,6 @@ You need the following installed on your machine:
 1. **Podman or Docker** (compose plugin available). The commands below work with either; replace `docker` with `podman` if you prefer Podman.
 2. **No local Go toolchain needed.** Tests run inside the provided `workshop-test` container.
 
----
-
-## 4. The Running Stack (Compose) and How to Start It
-
-What the compose stack contains (single registry reused by all tracks):
-- **Postgres** on `localhost:5432` (db: `basyxTestDB`, user: `admin`, password: `admin123`).
-- **Keycloak** on `localhost:8080` with the imported realm `basyx`.
-- **AAS Registry** on `localhost:6004` mounting `access_rules/access-rules.json` (the runner copies the selected track’s rules here before each test run).
-- **Test runner** container that executes the Go suites for you.
-
-Start the stack once (from `examples/BaSyxSecurityWorkshop/server_secured`):
-```
-docker compose -f docker_compose.yml up -d --build
-```
-Use `podman compose -f docker_compose.yml` instead of `docker compose -f docker_compose.yml` if you are on Podman.
 ---
 
 ## 5. Easy Task Foundations (Definitions + Examples)
@@ -203,29 +168,27 @@ You can give access too descriptor or to descritpors with specific id:
 
 ---
 
-## 10. Hard Task (Integration Suite)
-
-For the hard track you reuse the full integration suite.
-
-**What to change:**
-1. Open and edit `access_rules/hard.json`.
-2. Run the hard tests (integration suite):  
-   `docker compose run --rm workshop-test hard`
-
----
-
-## 12. Test Suites and How to Run Them
-
-- Start everything once (from `server_secured`): `docker compose up -d --build`  
-  (use `podman compose -f docker_compose.yml` on Podman).
-- Easy: `docker compose -f docker_compose.yml run --rm workshop-test easy`
-- Medium: `docker compose -f docker_compose.yml run --rm workshop-test medium`
-- Hard: `docker compose -f docker_compose.yml run --rm workshop-test hard`
-
-The runner copies the selected rule file into the active `access-rules.json`, restarts the registry (if Docker/Podman is available inside the runner), waits for health, and then executes the tests. If restart is not possible from inside the runner, restart the registry manually before running the command.
-
----
 
 ## 10. Materialization
 
 You can define 
+
+## 11. Hard Task (Freeform Exploration)
+
+For the hard track you are free to experiment:
+- Explore materialization concepts, build your own access rules and test cases.
+- Use the official examples for inspiration:  
+  Query language grammar: https://industrialdigitaltwin.io/aas-specifications/IDTA-01002/v3.1.1/query-language.html#query-grammar  
+  Access rule examples: https://industrialdigitaltwin.io/aas-specifications/IDTA-01004/v3.1/annex/json-access-rule-examples.html
+- Mix and match claims, fields, and formulas to create realistic policies; extend tests accordingly.
+- Use the hard test harness (`workshop-test hard`) to validate your custom scenarios.
+
+
+**What to change:**
+1. Open and edit `access_rules/hard.json`.
+2. Open and edit `tests/hard/testcases.json`.
+3. Run the hard tests:  
+   `docker compose run --rm workshop-test hard`
+
+
+There is no prescribed solution here—treat it as a sandbox to learn and push the ABAC model.
