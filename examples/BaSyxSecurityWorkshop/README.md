@@ -99,7 +99,7 @@ This rule gives read access to /route for everone.
 **What to change:**
 1. Open and edit `access_rules/easy.json`.
 2. Run the easy tests (this copies the rule into the active file and restarts the single registry if Docker/Podman is available inside the runner):  
-   `docker compose run --rm workshop-test easy`
+   `docker compose -f ./docker_compose.yml run --rm workshop-test easy`
 
 
 ## 7. Users, Credentials, and Claims (Keycloak Realm)
@@ -162,7 +162,7 @@ You can give access too descriptor or to descritpors with specific id:
 **What to change:**
 1. Open and edit `access_rules/medium.json`.
 2. Run the medium tests:  
-   `docker compose run --rm workshop-test medium`
+   `docker compose -f ./docker_compose.yml run --rm workshop-test medium`
 
 **Exercise:** Implement the rules so that the above behaviors hold, using claims (`role`, `clear`), descriptor interfaces, and the PUBLIC_READABLE tag. Test with anonymous, viewer (usera), editor (usery), and admin.
 
@@ -188,7 +188,7 @@ For the hard track you are free to experiment:
 1. Open and edit `access_rules/hard.json`.
 2. Open and edit `tests/hard/testcases.json`.
 3. Run the hard tests:  
-   `docker compose run --rm workshop-test hard`
+   `docker compose -f ./docker_compose.yml run --rm workshop-test hard`
 
 
 There is no prescribed solution here—treat it as a sandbox to learn and push the ABAC model.

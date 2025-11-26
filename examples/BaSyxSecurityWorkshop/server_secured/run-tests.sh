@@ -30,7 +30,7 @@ restart_registry() {
   for sock in /var/run/docker.sock /run/podman/podman.sock; do
     if [ -S "$sock" ]; then
       echo "Restarting registry via $sock ..."
-      if curl --unix-socket "$sock" -s -X POST http://localhost/containers/aas-registry/restart >/dev/null; then
+      if curl --unix-socket "$sock" -s -X POST http://localhost/containers/aas-registry-workshop/restart >/dev/null; then
         ok=1
         break
       else
@@ -45,7 +45,7 @@ restart_registry() {
 }
 
 wait_for_registry() {
-  url="http://aas-registry:5004/health"
+  url="http://aas-registry-workshop:5004/health"
   attempts=60
   while [ "$attempts" -gt 0 ]; do
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 "$url" || true)
@@ -63,9 +63,9 @@ wait_for_registry() {
 restart_registry
 wait_for_registry
 
-export WORKSHOP_BASE_URL="http://aas-registry:5004"
-export WORKSHOP_TOKEN_URL="${WORKSHOP_TOKEN_URL:-http://keycloak:8080/realms/basyx/protocol/openid-connect/token}"
-export WORKSHOP_DB_HOST="${WORKSHOP_DB_HOST:-db}"
+export WORKSHOP_BASE_URL="http://aas-registry-workshop:5004"
+export WORKSHOP_TOKEN_URL="${WORKSHOP_TOKEN_URL:-http://keycloak-workshop:8080/realms/basyx/protocol/openid-connect/token}"
+export WORKSHOP_DB_HOST="${WORKSHOP_DB_HOST:-db-workshop}"
 export WORKSHOP_DB_PORT="${WORKSHOP_DB_PORT:-5432}"
 export WORKSHOP_DB_USER="${WORKSHOP_DB_USER:-admin}"
 export WORKSHOP_DB_PASSWORD="${WORKSHOP_DB_PASSWORD:-admin123}"

@@ -1,12 +1,12 @@
 services:
-  aas-registry:
-    container_name: aas-registry
+  aas-registry-workshop:
+    container_name: aas-registry-workshop
     build:
       context: ../../..
       dockerfile: ./cmd/aasregistryservice/Dockerfile
     environment:
       - SERVER_PORT=5004
-      - POSTGRES_HOST=db
+      - POSTGRES_HOST=db-workshop
       - POSTGRES_PORT=5432
       - POSTGRES_USER=admin
       - POSTGRES_PASSWORD=admin123
@@ -22,18 +22,18 @@ services:
     ports:
       - "6004:5004"
     depends_on:
-      db:
+      db-workshop:
         condition: service_healthy
-      keycloak-healthcheck:
+      keycloak-healthcheck-workshop:
         condition: service_completed_successfully
     volumes:
       - ../access_rules:/config/access_rules
     extra_hosts:
       - "localhost:host-gateway"
 
-  db:
+  db-workshop:
     image: postgres:15
-    container_name: postgres_db
+    container_name: postgres_db_workshop
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: admin123
@@ -47,12 +47,12 @@ services:
       timeout: 5s
       retries: 5
 
-  keycloak:
+  keycloak-workshop:
     image: keycloak/keycloak:26.0.6
-    container_name: keycloak
+    container_name: keycloak-workshop
     environment:
       KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://db:5432/basyxTestDB
+      KC_DB_URL: jdbc:postgresql://db-workshop:5432/basyxTestDB
       KC_DB_USERNAME: admin
       KC_DB_PASSWORD: admin123
       KC_HOSTNAME: localhost
@@ -73,21 +73,21 @@ services:
     volumes:
       - ./keycloak/realm:/opt/keycloak/data/import
     depends_on:
-      db:
+      db-workshop:
         condition: service_healthy
 
-  keycloak-healthcheck:
+  keycloak-healthcheck-workshop:
     image: curlimages/curl:latest
-    container_name: keycloak-healthcheck
+    container_name: keycloak-healthcheck-workshop
     command: >
       sh -c "
         echo 'Waiting for Keycloak to become ready...';
-        until curl -sf http://keycloak:9000/health/ready; do
+        until curl -sf http://keycloak-workshop:9000/health/ready; do
           sleep 5;
         done;
         echo 'Keycloak is ready!'"
     depends_on:
-      - keycloak
+      - keycloak-workshop
 
   workshop-test:
     image: golang:1.25
@@ -95,12 +95,12 @@ services:
     working_dir: /workspace
     entrypoint: ["sh", "/workspace/examples/BaSyxSecurityWorkshop/server_secured/run-tests.sh"]
     environment:
-      - WORKSHOP_DB_HOST=db
+      - WORKSHOP_DB_HOST=db-workshop
       - WORKSHOP_DB_PORT=5432
       - WORKSHOP_DB_USER=admin
       - WORKSHOP_DB_PASSWORD=admin123
       - WORKSHOP_DB_NAME=basyxTestDB
-      - WORKSHOP_TOKEN_URL=http://keycloak:8080/realms/basyx/protocol/openid-connect/token
+      - WORKSHOP_TOKEN_URL=http://keycloak-workshop:8080/realms/basyx/protocol/openid-connect/token
     volumes:
       - ../../..:/workspace
       - /var/run/docker.sock:/var/run/docker.sock
@@ -108,7 +108,7 @@ services:
       - go-mod-cache:/go/pkg/mod
       - go-build-cache:/root/.cache/go-build
     depends_on:
-      keycloak-healthcheck:
+      keycloak-healthcheck-workshop:
         condition: service_completed_successfully
 
 volumes:
