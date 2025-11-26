@@ -1,0 +1,38 @@
+{
+  "id": "aas-editor-https2",
+  "idShort": "EditorHTTPS2",
+  "assetKind": "Instance",
+  "specificAssetIds": [
+    {
+      "name": "editor",
+      "value": "https2"
+    }
+  ],
+  "endpoints": [
+    {
+      "interface": "AAS-3.0",
+      "protocolInformation": {
+        "href": "https://editor2.example.org/endpoint"
+      }
+    }
+  ],
+  "submodelDescriptors": [
+    {
+      "id": "sm-https2",
+      "semanticId": {
+        "type": "ExternalReference",
+        "keys": [
+          { "type": "GlobalReference", "value": "2" }
+        ]
+      },
+      "endpoints": [
+        {
+          "interface": "AAS-3.0",
+          "protocolInformation": {
+            "href": "https://editor2.example.org/sm"
+          }
+        }
+      ]
+    }
+  ]
+}

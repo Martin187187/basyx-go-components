@@ -26,21 +26,23 @@ if ! command -v curl >/dev/null 2>&1; then
 fi
 
 restart_registry() {
+  ok=0
   for sock in /var/run/docker.sock /run/podman/podman.sock; do
     if [ -S "$sock" ]; then
       echo "Restarting registry via $sock ..."
       if curl --unix-socket "$sock" -s -X POST http://localhost/containers/aas-registry/restart >/dev/null; then
-        echo "Registry restart requested on $sock"
-        return
+        ok=1
+        break
       else
-        echo "Registry restart failed via $sock"
+        echo "Registry restart failed via $sock" >&2
       fi
     fi
   done
-  echo "Could not restart registry from runner; restart manually if rules changed."
+  if [ $ok -eq 0 ]; then
+    echo "Could not restart registry from runner; restart manually if rules changed." >&2
+    exit 1
+  fi
 }
-
-restart_registry
 
 wait_for_registry() {
   url="http://aas-registry:5004/health"
@@ -54,10 +56,11 @@ wait_for_registry() {
     attempts=$((attempts - 1))
     sleep 2
   done
-  echo "Registry did not become healthy in time"
-  return 1
+  echo "Registry did not become healthy in time" >&2
+  exit 1
 }
 
+restart_registry
 wait_for_registry
 
 export WORKSHOP_BASE_URL="http://aas-registry:5004"

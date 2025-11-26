@@ -1,38 +1,34 @@
 [
-  {
-    "name": "admin can create descriptor",
-    "method": "POST",
-    "path": "/shell-descriptors",
-    "data": "examples/BaSyxSecurityWorkshop/tests/medium/postBody/simple_aas_medium.json",
-    "expectedStatus": 201,
-    "token": { "user": "admin", "password": "pwd" }
-  },
-  {
-    "name": "viewer can list descriptors",
-    "method": "GET",
-    "path": "/shell-descriptors",
-    "expectedStatus": 200,
-    "token": { "user": "usera", "password": "pwd" }
-  },
-  {
-    "name": "viewer can read created descriptor",
-    "method": "GET",
-    "path": "/shell-descriptors/aas-medium-1",
-    "expectedStatus": 200,
-    "token": { "user": "usera", "password": "pwd" }
-  },
-  {
-    "name": "viewer cannot delete descriptor",
-    "method": "DELETE",
-    "path": "/shell-descriptors/aas-medium-1",
-    "expectedStatus": 403,
-    "token": { "user": "usera", "password": "pwd" }
-  },
-  {
-    "name": "admin can delete descriptor",
-    "method": "DELETE",
-    "path": "/shell-descriptors/aas-medium-1",
-    "expectedStatus": 204,
-    "token": { "user": "admin", "password": "pwd" }
-  }
+  { "name": "admin creates aas-public", "method": "POST", "path": "/shell-descriptors", "data": "examples/BaSyxSecurityWorkshop/tests/medium/postBody/aas_public.json", "expectedStatus": 201, "token": { "user": "admin", "password": "pwd" } },
+  { "name": "admin creates aas-viewer-secure", "method": "POST", "path": "/shell-descriptors", "data": "examples/BaSyxSecurityWorkshop/tests/medium/postBody/aas_viewer.json", "expectedStatus": 201, "token": { "user": "admin", "password": "pwd" } },
+  { "name": "editor creates aas-editor-secure", "method": "POST", "path": "/shell-descriptors", "data": "examples/BaSyxSecurityWorkshop/tests/medium/postBody/aas_editor_https2.json", "expectedStatus": 201, "token": { "user": "usery", "password": "pwd" } },
+  { "name": "admin creates aas-admin-high", "method": "POST", "path": "/shell-descriptors", "data": "examples/BaSyxSecurityWorkshop/tests/medium/postBody/aas_admin_https5.json", "expectedStatus": 201, "token": { "user": "admin", "password": "pwd" } },
+  { "name": "admin creates aas-deny-http", "method": "POST", "path": "/shell-descriptors", "data": "examples/BaSyxSecurityWorkshop/tests/medium/postBody/aas_denied_high.json", "expectedStatus": 201, "token": { "user": "admin", "password": "pwd" } },
+  { "name": "anon cannot create", "method": "POST", "path": "/shell-descriptors", "data": "examples/BaSyxSecurityWorkshop/tests/medium/postBody/aas_public.json", "expectedStatus": 403 },
+  { "name": "viewer cannot create", "method": "POST", "path": "/shell-descriptors", "data": "examples/BaSyxSecurityWorkshop/tests/medium/postBody/aas_viewer.json", "expectedStatus": 403, "token": { "user": "usera", "password": "pwd" } },
+  { "name": "editor cannot create deny-http", "method": "POST", "path": "/shell-descriptors", "data": "examples/BaSyxSecurityWorkshop/tests/medium/postBody/aas_denied_high.json", "expectedStatus": 403, "token": { "user": "usery", "password": "pwd" } },
+
+  { "name": "anon list", "method": "GET", "path": "/shell-descriptors", "expectedStatus": 200 },
+  { "name": "viewer list", "method": "GET", "path": "/shell-descriptors", "expectedStatus": 200, "token": { "user": "usera", "password": "pwd" } },
+  { "name": "editor list", "method": "GET", "path": "/shell-descriptors", "expectedStatus": 200, "token": { "user": "usery", "password": "pwd" } },
+  { "name": "admin list", "method": "GET", "path": "/shell-descriptors", "expectedStatus": 200, "token": { "user": "admin", "password": "pwd" } },
+
+  { "name": "anon get public", "method": "GET", "path": "/shell-descriptors/YWFzLXB1YmxpYw", "expectedStatus": 200 },
+  { "name": "anon get viewer-secure denied", "method": "GET", "path": "/shell-descriptors/YWFzLXZpZXdlcg", "expectedStatus": 403 },
+  { "name": "viewer get viewer-secure", "method": "GET", "path": "/shell-descriptors/YWFzLXZpZXdlcg", "expectedStatus": 200, "token": { "user": "usera", "password": "pwd" } },
+  { "name": "viewer get admin-high", "method": "GET", "path": "/shell-descriptors/YWFzLWFkbWluLWh0dHBzMTA", "expectedStatus": 200, "token": { "user": "usera", "password": "pwd" } },
+  { "name": "editor get editor-secure", "method": "GET", "path": "/shell-descriptors/YWFzLWVkaXRvci1odHRwczI", "expectedStatus": 200, "token": { "user": "usery", "password": "pwd" } },
+  { "name": "editor get admin-high", "method": "GET", "path": "/shell-descriptors/YWFzLWFkbWluLWh0dHBzMTA", "expectedStatus": 200, "token": { "user": "usery", "password": "pwd" } },
+  { "name": "admin get admin-high", "method": "GET", "path": "/shell-descriptors/YWFzLWFkbWluLWh0dHBzMTA", "expectedStatus": 200, "token": { "user": "admin", "password": "pwd" } },
+  { "name": "viewer get deny-http denied", "method": "GET", "path": "/shell-descriptors/YWFzLWRlbnktaGlnaA", "expectedStatus": 403, "token": { "user": "usera", "password": "pwd" } },
+  { "name": "editor get deny-http denied", "method": "GET", "path": "/shell-descriptors/YWFzLWRlbnktaGlnaA", "expectedStatus": 403, "token": { "user": "usery", "password": "pwd" } },
+  { "name": "admin get deny-http", "method": "GET", "path": "/shell-descriptors/YWFzLWRlbnktaGlnaA", "expectedStatus": 200, "token": { "user": "admin", "password": "pwd" } },
+
+  { "name": "admin put public", "method": "PUT", "path": "/shell-descriptors/YWFzLXB1YmxpYw", "data": "examples/BaSyxSecurityWorkshop/tests/medium/postBody/aas_public.json", "expectedStatus": 204, "token": { "user": "admin", "password": "pwd" } },
+  { "name": "editor put viewer-secure", "method": "PUT", "path": "/shell-descriptors/YWFzLXZpZXdlcg", "data": "examples/BaSyxSecurityWorkshop/tests/medium/postBody/aas_viewer.json", "expectedStatus": 204, "token": { "user": "usery", "password": "pwd" } },
+  { "name": "editor put editor-secure", "method": "PUT", "path": "/shell-descriptors/YWFzLWVkaXRvci1odHRwczI", "data": "examples/BaSyxSecurityWorkshop/tests/medium/postBody/aas_editor_https2.json", "expectedStatus": 204, "token": { "user": "usery", "password": "pwd" } },
+  { "name": "editor put admin-high", "method": "PUT", "path": "/shell-descriptors/YWFzLWFkbWluLWh0dHBzMTA", "data": "examples/BaSyxSecurityWorkshop/tests/medium/postBody/aas_admin_https5.json", "expectedStatus": 204, "token": { "user": "usery", "password": "pwd" } },
+  { "name": "admin put admin-high", "method": "PUT", "path": "/shell-descriptors/YWFzLWFkbWluLWh0dHBzMTA", "data": "examples/BaSyxSecurityWorkshop/tests/medium/postBody/aas_admin_https5.json", "expectedStatus": 204, "token": { "user": "admin", "password": "pwd" } },
+  { "name": "editor put deny-http denied", "method": "PUT", "path": "/shell-descriptors/YWFzLWRlbnktaGlnaA", "data": "examples/BaSyxSecurityWorkshop/tests/medium/postBody/aas_denied_high.json", "expectedStatus": 403, "token": { "user": "usery", "password": "pwd" } },
+  { "name": "admin put deny-http", "method": "PUT", "path": "/shell-descriptors/YWFzLWRlbnktaGlnaA", "data": "examples/BaSyxSecurityWorkshop/tests/medium/postBody/aas_denied_high.json", "expectedStatus": 204, "token": { "user": "admin", "password": "pwd" } }
 ]

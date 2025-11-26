@@ -1,0 +1,38 @@
+{
+  "id": "aas-admin-https10",
+  "idShort": "AdminHTTPS10",
+  "assetKind": "Instance",
+  "specificAssetIds": [
+    {
+      "name": "admin",
+      "value": "https5"
+    }
+  ],
+  "endpoints": [
+    {
+      "interface": "AAS-3.0",
+      "protocolInformation": {
+        "href": "https://admin10.example.org/endpoint"
+      }
+    }
+  ],
+  "submodelDescriptors": [
+    {
+      "id": "sm-https10",
+      "semanticId": {
+        "type": "ExternalReference",
+        "keys": [
+          { "type": "GlobalReference", "value": "10" }
+        ]
+      },
+      "endpoints": [
+        {
+          "interface": "AAS-2.0",
+          "protocolInformation": {
+            "href": "https://admin10.example.org/sm"
+          }
+        }
+      ]
+    }
+  ]
+}

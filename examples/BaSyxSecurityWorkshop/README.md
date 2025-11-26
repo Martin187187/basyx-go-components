@@ -189,15 +189,17 @@ You can give access too descriptor or to descritpors with specific id:
 ## 9. Medium Task (Business Case + How-To)
 
 **Business case:**  
-- Everybody can read descriptors that have "PUBLIC_READABLE" in $aasdesc#specificAssetIds[].externalSubjectId.keys[].value.
-- Viewers can use /shell-descriptors/{id}.
-- Viewers with clear>1  can read all shell-descriptors.
-- Admins can CREATE, UPDATE, DELETE and READ all shell-descriptors
+- Anonymous can read descriptors tagged PUBLIC_READABLE.
+- Viewers can read descriptors that have interface `AAS-3.0` (secure endpoints), plus public ones; no writes.
+- Editors or admins with `clear >= 2` can read/write descriptors with interface `AAS-3.0`.
+- Admins or editors with `clear >= 10` can read/write everything.
 
 **What to change:**
 1. Open and edit `access_rules/medium.json`.
 2. Run the medium tests:  
    `docker compose run --rm workshop-test medium`
+
+**Exercise:** Implement the rules so that the above behaviors hold, using claims (`role`, `clear`), descriptor interfaces, and the PUBLIC_READABLE tag. Test with anonymous, viewer (usera), editor (usery), and admin.
 
 ---
 

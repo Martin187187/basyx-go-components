@@ -1,0 +1,44 @@
+{
+  "id": "aas-public",
+  "idShort": "PublicAAS",
+  "assetKind": "Instance",
+  "specificAssetIds": [
+    {
+      "name": "publicTag",
+      "value": "true",
+      "externalSubjectId": {
+        "type": "ExternalReference",
+        "keys": [
+          { "type": "GlobalReference", "value": "PUBLIC_READABLE" }
+        ]
+      }
+    }
+  ],
+  "endpoints": [
+    {
+      "interface": "AAS-3.0",
+      "protocolInformation": {
+        "href": "https://public.example.org/endpoint"
+      }
+    }
+  ],
+  "submodelDescriptors": [
+    {
+      "id": "sm-public",
+      "semanticId": {
+        "type": "ExternalReference",
+        "keys": [
+          { "type": "GlobalReference", "value": "1" }
+        ]
+      },
+      "endpoints": [
+        {
+          "interface": "AAS-3.0",
+          "protocolInformation": {
+            "href": "https://public.example.org/sm"
+          }
+        }
+      ]
+    }
+  ]
+}

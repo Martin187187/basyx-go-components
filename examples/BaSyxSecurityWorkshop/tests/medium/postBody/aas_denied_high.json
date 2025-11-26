@@ -1,0 +1,38 @@
+{
+  "id": "aas-deny-high",
+  "idShort": "DenyHigh",
+  "assetKind": "Instance",
+  "specificAssetIds": [
+    {
+      "name": "restricted",
+      "value": "deny-high"
+    }
+  ],
+  "endpoints": [
+    {
+      "interface": "AAS-1.0",
+      "protocolInformation": {
+        "href": "http://deny.example.org/endpoint"
+      }
+    }
+  ],
+  "submodelDescriptors": [
+    {
+      "id": "sm-high",
+      "semanticId": {
+        "type": "ExternalReference",
+        "keys": [
+          { "type": "GlobalReference", "value": "50" }
+        ]
+      },
+      "endpoints": [
+        {
+          "interface": "AAS-1.0",
+          "protocolInformation": {
+            "href": "http://deny.example.org/sm"
+          }
+        }
+      ]
+    }
+  ]
+}

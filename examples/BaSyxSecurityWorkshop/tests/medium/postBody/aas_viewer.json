@@ -1,0 +1,44 @@
+{
+  "id": "aas-viewer",
+  "idShort": "ViewerAAS",
+  "assetKind": "Instance",
+  "specificAssetIds": [
+    {
+      "name": "access",
+      "value": "viewer-only",
+      "externalSubjectId": {
+        "type": "ExternalReference",
+        "keys": [
+          { "type": "GlobalReference", "value": "INTERNAL_ONLY" }
+        ]
+      }
+    }
+  ],
+  "endpoints": [
+    {
+      "interface": "AAS-3.0",
+      "protocolInformation": {
+        "href": "https://viewer.example.org/endpoint"
+      }
+    }
+  ],
+  "submodelDescriptors": [
+    {
+      "id": "sm-viewer",
+      "semanticId": {
+        "type": "ExternalReference",
+        "keys": [
+          { "type": "GlobalReference", "value": "2" }
+        ]
+      },
+      "endpoints": [
+        {
+          "interface": "AAS-3.0",
+          "protocolInformation": {
+            "href": "https://viewer.example.org/sm"
+          }
+        }
+      ]
+    }
+  ]
+}

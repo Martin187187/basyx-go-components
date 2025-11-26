@@ -1,0 +1,28 @@
+{
+  "id": "aas-admin-http3",
+  "idShort": "AdminHTTP3",
+  "assetKind": "Instance",
+  "specificAssetIds": [
+    {
+      "name": "admin",
+      "value": "http3"
+    }
+  ],
+  "endpoints": [
+    {
+      "protocolInformation": {
+        "href": "https://admin3.example.org/endpoint"
+      }
+    }
+  ],
+  "submodelDescriptors": [
+    {
+      "id": "sm-http3",
+      "semanticId": {
+        "keys": [
+          { "type": "GlobalReference", "value": "3" }
+        ]
+      }
+    }
+  ]
+}
