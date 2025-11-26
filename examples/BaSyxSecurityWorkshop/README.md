@@ -66,7 +66,7 @@ Each rule has an `ACL`: An ACL mus have `ACCESS` and `RIGHTS` fields. `ACCESS` c
 {
   "ACCESS": "ALLOW",
   "RIGHTS": ["READ"],
-  "attributes": [{ "GLOBAL": "ANONYMOUS" }]
+  "ATTRIBUTES": [{ "GLOBAL": "ANONYMOUS" }]
 }
 ```
 
@@ -93,7 +93,7 @@ This rule gives read access to /route for everone.
         "ACL": {
           "ACCESS": "ALLOW",
           "RIGHTS": ["READ"],
-          "attributes": [{ "GLOBAL": "ANONYMOUS" }]
+          "ATTRIBUTES": [{ "GLOBAL": "ANONYMOUS" }]
         },
         "OBJECTS": [{ "ROUTE": "/route" }],
         "FORMULA": { "$boolean": true }
@@ -138,7 +138,7 @@ Claims visible to rules:
 {
   "ACCESS": "ALLOW",
   "RIGHTS": ["READ"],
-  "attributes": [ { "CLAIM": "role" }, { "CLAIM": "clear" } ]
+  "ATTRIBUTES": [ { "CLAIM": "role" }, { "CLAIM": "clear" } ]
 }
 ```
 ### 8.2 OBJECT
