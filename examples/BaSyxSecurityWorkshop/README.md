@@ -36,6 +36,19 @@ You need the following installed on your machine:
 
 ---
 
+## 4. Getting Started (clone, cd, compose up)
+
+1. Clone the repo (or add the remote) and switch to the desired branch:  
+   `git clone https://github.com/Martin187187/basyx-go-components`  
+   `git checkout security-workshop`
+2. Go to the workshop folder:  
+   `cd examples/BaSyxSecurityWorkshop/server_secured`
+3. Start the stack:  
+   `podman compose -f ./docker_compose.yml up -d --build`  
+   (use `docker compose -f ./docker_compose.yml up -d --build` if you prefer Docker)
+
+---
+
 ## 5. Easy Task Foundations (Definitions + Examples)
 
 Before the first hands-on task, here are the minimal concepts you need for the easy level.
@@ -154,7 +167,7 @@ You can give access too descriptor or to descritpors with specific id:
 ## 9. Medium Task (Business Case + How-To)
 
 **Business case:**  
-- Anonymous can read descriptors tagged PUBLIC_READABLE.
+- Anonymous can read descriptors tagged PUBLIC_READABLE (need field for that: `$aasdesc#specificAssetIds[].externalSubjectId.keys[].value`).
 - Viewers can read descriptors that have interface `AAS-3.0` (secure endpoints), plus public ones; no writes.
 - Editors or admins with `clear >= 2` can read/write descriptors with interface `AAS-3.0`.
 - Admins or editors with `clear >= 10` can read/write everything.
