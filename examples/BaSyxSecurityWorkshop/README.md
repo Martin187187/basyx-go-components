@@ -161,7 +161,7 @@ You can give access too descriptor or to descritpors with specific id:
 }
 ```
 ```
-{"$eq": [ {"$field": "$aasdesc#specificAssetIds[].externalSubjectId.keys[].value"}, {"$strVal": "PUBLIC_READABLE"}]}
+{"$eq": [ {"$field": "$aasdesc#submodelDescriptors[].semanticId.keys[].value"}, {"$strVal": "PUBLIC_READABLE"}]}
 ```
 
 ## 9. Medium Task (Business Case + How-To)
@@ -169,8 +169,8 @@ You can give access too descriptor or to descritpors with specific id:
 **Business case:**  
 - Anonymous can read descriptors tagged PUBLIC_READABLE (need field for that: `$aasdesc#specificAssetIds[].externalSubjectId.keys[].value`).
 - Viewers can read descriptors that have interface `AAS-3.0` (secure endpoints), plus public ones; no writes.
-- Editors or admins with `clear >= 2` can read/write descriptors with interface `AAS-3.0`.
-- Admins or editors with `clear >= 10` can read/write everything.
+- Editors or admins with `clear >= 2` can read/write (CRUD) descriptors with interface `AAS-3.0`.
+- Admins or editors with `clear >= 10` can read/write (CRUD) everything.
 
 **What to change:**
 1. Open and edit `access_rules/medium.json`.
@@ -184,7 +184,34 @@ You can give access too descriptor or to descritpors with specific id:
 
 ## 10. Materialization
 
-You can define 
+Example with materialization of everything.
+```
+{
+  "AllAccessPermissionRules": {
+    "DEFACLS": [
+      { "name": "create_only_member", "acl": { "USEATTRIBUTES": "is_member",    "RIGHTS": ["CREATE"], "ACCESS": "ALLOW" } },
+    ],
+
+    "DEFATTRIBUTES": [
+      { "name": "is_member",      "attributes": [ { "CLAIM": "role" }, { "CLAIM": "clear" } ] }
+    ],
+
+    "DEFOBJECTS": [
+      { "name": "shellsByAssetLink",   "objects": [ { "ROUTE": "/lookup/shellsByAssetLink" } ] }
+    ],
+
+    "DEFFORMULAS": [
+      { "name": "always_true", "formula": { "$boolean": true } }
+    ]
+
+    "rules": [
+      { "USEACL": "create_only_member", "USEOBJECTS": ["shellsByAssetLink"], "USEFORMULA": "always_true" }
+    ]
+  }
+}
+
+
+```
 
 ## 11. Hard Task (Freeform Exploration)
 
@@ -193,8 +220,10 @@ For the hard track you are free to experiment:
 - Use the official examples for inspiration:  
   Query language grammar: https://industrialdigitaltwin.io/aas-specifications/IDTA-01002/v3.1.1/query-language.html#query-grammar  
   Access rule examples: https://industrialdigitaltwin.io/aas-specifications/IDTA-01004/v3.1/annex/json-access-rule-examples.html
+- change keycloak configuration: http://localhost:8080 (username: admin, password: admin)
 - Mix and match claims, fields, and formulas to create realistic policies; extend tests accordingly.
 - Use the hard test harness (`workshop-test hard`) to validate your custom scenarios.
+- Use Postman to test your access rules
 
 
 **What to change:**
