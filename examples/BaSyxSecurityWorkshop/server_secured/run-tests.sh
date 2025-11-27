@@ -1,5 +1,5 @@
 #!/bin/sh
-set -eu
+set -e
 
 track="${1:-}"
 case "$track" in
