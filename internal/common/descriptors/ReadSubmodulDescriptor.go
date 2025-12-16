@@ -1,3 +1,29 @@
+/*******************************************************************************
+* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+// Author: Martin Stemmer ( Fraunhofer IESE )
+
 package descriptors
 
 import (
@@ -6,7 +32,6 @@ import (
 	"fmt"
 
 	"github.com/doug-martin/goqu/v9"
-	"github.com/eclipse-basyx/basyx-go-components/internal/common/builder"
 	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
 	"github.com/lib/pq"
 	"golang.org/x/sync/errgroup"
@@ -21,7 +46,8 @@ import (
 // fully materialized submodel descriptors including optional fields such as
 // SemanticId, Administration, DisplayName, Description, Endpoints, Extensions
 // and SupplementalSemanticId where available. The order of results is by
-// internal descriptor id and then submodel descriptor id ascending.
+// internal descriptor id, then the submodel descriptor position, and finally
+// submodel descriptor id ascending.
 //
 // Parameters:
 //   - ctx: request-scoped context used for cancellation and deadlines
@@ -90,8 +116,7 @@ func ReadSubmodelDescriptorsByAASDescriptorIDs(
 		).
 		Where(goqu.L(fmt.Sprintf("smd.%s = ANY(?::bigint[])", colAASDescriptorID), arr)).
 		Order(
-			smd.Col(colAASDescriptorID).Asc(),
-			smd.Col(colDescriptorID).Asc(),
+			smd.Col(colPosition).Asc(),
 		).
 		ToSQL()
 	if err != nil {
@@ -106,7 +131,7 @@ func ReadSubmodelDescriptorsByAASDescriptorIDs(
 		_ = rows.Close()
 	}()
 
-	perAAS := make(map[int64][]builder.SubmodelDescriptorRow, len(uniqAASDesc))
+	perAAS := make(map[int64][]model.SubmodelDescriptorRow, len(uniqAASDesc))
 	allSmdDescIDs := make([]int64, 0, 10000)
 	semRefIDs := make([]int64, 0, 10000)
 	adminInfoIDs := make([]int64, 0, 10000)
@@ -114,7 +139,7 @@ func ReadSubmodelDescriptorsByAASDescriptorIDs(
 	displayNameIDs := make([]int64, 0, 10000)
 
 	for rows.Next() {
-		var r builder.SubmodelDescriptorRow
+		var r model.SubmodelDescriptorRow
 		if err := rows.Scan(
 			&r.AasDescID,
 			&r.SmdDescID,

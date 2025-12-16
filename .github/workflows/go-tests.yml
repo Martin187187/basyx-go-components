@@ -21,7 +21,7 @@ jobs:
   #   runs-on: ubuntu-latest
   #   steps:
   #     - name: Check out code
-  #       uses: actions/checkout@v5
+  #       uses: actions/checkout@v6
   #     - name: Set up Go
   #       uses: actions/setup-go@v6
   #       with:
@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -69,13 +69,17 @@ jobs:
           cd internal/discoveryservice/integration_tests
           go test -v
 
-      - name: Run access controll validation tests
-        run: |
-          cd internal/common/security/model/unit_tests
-          go test -v
       - name: Run aas registry tests
         run: |
           cd internal/aasregistry/integration_tests
+          go test -v
+      - name: Run aas registry security tests
+        run: |
+          cd internal/aasregistry/security_tests
+          go test -v
+      - name: Run aas registry security tests 2
+        run: |
+          cd internal/aasregistry/security_operator_tests
           go test -v
       # - name: Cleanup Docker
       #   if: always()

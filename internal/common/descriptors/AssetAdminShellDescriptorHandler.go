@@ -1,3 +1,28 @@
+/*******************************************************************************
+* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
 // Package descriptors contains the data‑access helpers that read and write
 // Asset Administration Shell (AAS) and Submodel descriptor data to a
 // PostgreSQL database.
@@ -14,6 +39,7 @@
 // Queries are built with goqu and executed via database/sql. Most read helpers
 // return plain model types from internal/common/model so callers can use the
 // results directly without further mapping.
+// Author: Martin Stemmer ( Fraunhofer IESE )
 package descriptors
 
 import (
@@ -24,7 +50,6 @@ import (
 
 	"github.com/doug-martin/goqu/v9"
 	"github.com/eclipse-basyx/basyx-go-components/internal/common"
-	"github.com/eclipse-basyx/basyx-go-components/internal/common/builder"
 	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
 	persistence_utils "github.com/eclipse-basyx/basyx-go-components/internal/submodelrepository/persistence/utils"
 	"golang.org/x/sync/errgroup"
@@ -119,7 +144,7 @@ func InsertAdministrationShellDescriptorTx(_ context.Context, tx *sql.Tx, aasd m
 		return err
 	}
 
-	if err = createEndpoints(tx, descriptorID, aasd.Endpoints); err != nil {
+	if err = CreateEndpoints(tx, descriptorID, aasd.Endpoints); err != nil {
 		return common.NewInternalServerError("Failed to create Endpoints - no changes applied - see console for details")
 	}
 
@@ -398,6 +423,12 @@ func ListAssetAdministrationShellDescriptors(
 			aas.Col(colDisplayNameID),
 			aas.Col(colDescriptionID),
 		)
+
+	ds, err := getFilterQueryFromContext(ctx, d, ds, aas)
+	if err != nil {
+		return nil, "", err
+	}
+
 	if cursor != "" {
 		ds = ds.Where(aas.Col(colAASID).Gte(cursor))
 	}
@@ -414,22 +445,26 @@ func ListAssetAdministrationShellDescriptors(
 		Order(aas.Col(colAASID).Asc()).
 		Limit(uint(peekLimit))
 
-	sqlStr, args, buildErr := ds.ToSQL()
-	if buildErr != nil {
-		return nil, "", common.NewInternalServerError("Failed to build AAS descriptor query. See server logs for details.")
+	sqlStr, args, err := ds.ToSQL()
+
+	fmt.Println(sqlStr)
+	fmt.Println(args)
+	if err != nil {
+		return nil, "", err
 	}
 
 	rows, err := db.QueryContext(ctx, sqlStr, args...)
 	if err != nil {
-		return nil, "", common.NewInternalServerError("Failed to query AAS descriptors. See server logs for details.")
+		return nil, "", err
 	}
 	defer func() {
 		_ = rows.Close()
 	}()
 
-	descRows := make([]builder.AssetAdministrationShellDescriptorRow, 0, peekLimit)
+	descRows := make([]model.AssetAdministrationShellDescriptorRow, 0, peekLimit)
 	for rows.Next() {
-		var r builder.AssetAdministrationShellDescriptorRow
+		fmt.Println("a")
+		var r model.AssetAdministrationShellDescriptorRow
 		if err := rows.Scan(
 			&r.DescID,
 			&r.AssetKindStr,

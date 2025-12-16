@@ -40,12 +40,14 @@ jobs:
             image: eclipsebasyx/aasregistry-go
           - name: discoveryservice
             image: eclipsebasyx/aasdiscovery-go
+          - name: registryofregistriesservice
+            image: eclipsebasyx/registryofregistries-go
         #   - name: submodelrepositoryservice
         #     image: eclipsebasyx/submodelrepository-go
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
