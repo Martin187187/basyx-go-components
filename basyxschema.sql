@@ -692,6 +692,7 @@ CREATE INDEX IF NOT EXISTS ix_descriptor_extension_pair          ON descriptor_e
 
 
 CREATE INDEX IF NOT EXISTS ix_specasset_descriptor_id_name ON specific_asset_id (descriptor_id, name);
+CREATE INDEX IF NOT EXISTS sai_external_subject_ref_idx ON specific_asset_id (external_subject_ref);
 CREATE INDEX IF NOT EXISTS ix_specasset_descriptor_id_position ON specific_asset_id (descriptor_id, position);
 CREATE INDEX IF NOT EXISTS ix_specasset_descriptor_id_external_subject_ref ON specific_asset_id (descriptor_id, external_subject_ref);
 

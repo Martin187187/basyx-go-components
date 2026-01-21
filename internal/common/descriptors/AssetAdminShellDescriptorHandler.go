@@ -47,6 +47,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/doug-martin/goqu/v9"
 	"github.com/eclipse-basyx/basyx-go-components/internal/common"
@@ -458,6 +459,10 @@ func listAssetAdministrationShellDescriptors(
 	identifiable string,
 	allowParallel bool,
 ) ([]model.AssetAdministrationShellDescriptor, string, error) {
+	start := time.Now()
+	defer func() {
+		fmt.Printf("ListAssetAdministrationShellDescriptors took %s\n", time.Since(start))
+	}()
 	if limit <= 0 {
 		limit = 1000000
 	}
@@ -467,6 +472,7 @@ func listAssetAdministrationShellDescriptors(
 		return nil, "", err
 	}
 	sqlStr, args, err := ds.ToSQL()
+	fmt.Println(sqlStr)
 
 	if err != nil {
 		return nil, "", err

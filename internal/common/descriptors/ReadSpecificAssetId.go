@@ -30,6 +30,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/doug-martin/goqu/v9"
 	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
@@ -111,6 +112,11 @@ func ReadSpecificAssetIDsByDescriptorIDs(
 	db DBQueryer,
 	descriptorIDs []int64,
 ) (map[int64][]model.SpecificAssetID, error) {
+	start := time.Now()
+	defer func() {
+		fmt.Printf("ReadSpecificAssetIDsByDescriptorIDs took %s\n", time.Since(start))
+	}()
+
 	out := make(map[int64][]model.SpecificAssetID, len(descriptorIDs))
 	if len(descriptorIDs) == 0 {
 		return out, nil

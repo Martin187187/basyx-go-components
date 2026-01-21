@@ -30,6 +30,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/doug-martin/goqu/v9"
 	// nolint:revive
@@ -91,6 +92,10 @@ func ReadEndpointsByDescriptorIDs(
 	descriptorIDs []int64,
 	joinOnMainTable bool,
 ) (map[int64][]model.Endpoint, error) {
+	start := time.Now()
+	defer func() {
+		fmt.Printf("ReadEndpointsByDescriptorIDs took %s\n", time.Since(start))
+	}()
 	out := make(map[int64][]model.Endpoint, len(descriptorIDs))
 	if len(descriptorIDs) == 0 {
 		return out, nil
