@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "JSON Schema for AAS Queries",
-  "description": "This schema validates AAS Queries.",
+  "title": "Common JSON Schema for AAS Queries and Access Rules",
+  "description": "This schema contains all classes that are shared between the AAS Query Language and the AAS Access Rule Language.",
   "$ref": "#/definitions/Root",
   "definitions": {
     "Root": {
@@ -217,11 +217,11 @@
         "$strVal": {
           "$ref": "#/definitions/standardString"
         },
-        "$attribute": {
-          "$ref": "#/definitions/attributeItem"
-        },
         "$strCast": {
           "$ref": "#/definitions/Value"
+        },
+        "$attribute": {
+          "$ref": "#/definitions/attributeItem"
         }
       },
       "oneOf": [
@@ -237,12 +237,12 @@
         },
         {
           "required": [
-            "$attribute"
+            "$strCast"
           ]
         },
         {
           "required": [
-            "$strCast"
+            "$attribute"
           ]
         }
       ],
@@ -605,8 +605,7 @@
         "DELETE",
         "EXECUTE",
         "VIEW",
-        "ALL",
-        "TREE"
+        "ALL"
       ],
       "additionalProperties": false
     },
@@ -683,24 +682,20 @@
         "USEFORMULA": {
           "type": "string"
         },
-        "FRAGMENT": {
-          "$ref": "#/definitions/fieldIdentifierFragment"
-        },
         "FILTER": {
-          "$ref": "#/definitions/logicalExpression",
+          "$ref": "#/definitions/SecurityQueryFilter",
           "additionalProperties": false
-        },
-        "USEFILTER": {
-          "type": "string"
         },
         "FILTERLIST": {
           "type": "array",
-          "minItems": 1,
           "items": {
             "$ref": "#/definitions/SecurityQueryFilter"
           }
         }
       },
+      "required": [
+        "FILTER"
+      ],
       "allOf": [
         {
           "oneOf": [
@@ -743,43 +738,6 @@
               ]
             }
           ]
-        },
-        {
-          "oneOf": [
-            {
-              "required": [
-                "FRAGMENT",
-                "FILTER"
-              ]
-            },
-            {
-              "required": [
-                "FRAGMENT",
-                "USEFILTER"
-              ]
-            },
-            {
-              "not": {
-                "anyOf": [
-                  {
-                    "required": [
-                      "FRAGMENT"
-                    ]
-                  },
-                  {
-                    "required": [
-                      "FILTER"
-                    ]
-                  },
-                  {
-                    "required": [
-                      "USEFILTER"
-                    ]
-                  }
-                ]
-              }
-            }
-          ]
         }
       ],
       "additionalProperties": false
@@ -790,10 +748,10 @@
         "FRAGMENT": {
           "$ref": "#/definitions/fieldIdentifierFragment"
         },
-        "FILTER": {
+        "CONDITION": {
           "$ref": "#/definitions/logicalExpression"
         },
-        "USEFILTER": {
+        "USEFORMULA": {
           "type": "string"
         }
       },
@@ -803,12 +761,12 @@
       "oneOf": [
         {
           "required": [
-            "FILTER"
+            "CONDITION"
           ]
         },
         {
           "required": [
-            "USEFILTER"
+            "USEFORMULA"
           ]
         }
       ],

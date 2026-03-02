@@ -1,43 +1,42 @@
 {
-"Query": 
-    {
+  "Query": {
     "$condition": {
-        "$eq": [
+      "$eq": [
         {
-            "$field": "$sm#semanticId"
+          "$field": "$sm#semanticId"
         },
         {
-            "$strVal": "https://admin-shell.io/idta/nameplate/3/0/Nameplate"
+          "$strVal": "https://admin-shell.io/idta/nameplate/3/0/Nameplate"
         }
-        ]
+      ]
     },
     "$filters": [
-        {
+      {
         "$fragment": "$sme#value",
         "$condition": {
-            "$eq": [
+          "$eq": [
             {
-                "$field": "$sm#semanticId.keys[].value"
+              "$field": "$sm#semanticId.keys[].value"
             },
             {
-                "$strVal": "HIDE_VALUE"
+              "$strVal": "HIDE_VALUE"
             }
-            ]
+          ]
         }
-        },
-        {
+      },
+      {
         "$fragment": "$sm#semanticId.keys[]",
         "$condition": {
-            "$eq": [
+          "$eq": [
             {
-                "$field": "$sm#semanticId.keys[].value"
+              "$field": "$sm#semanticId.keys[].value"
             },
             {
-                "$strVal": "HIDE_VALUE"
+              "$strVal": "HIDE_VALUE"
             }
-            ]
+          ]
         }
-        }
+      }
     ]
-    }
+  }
 }

@@ -86,7 +86,11 @@ func TestSchemaValidationMatrix(t *testing.T) {
       {
         "USEACL": "read_public",
         "USEOBJECTS": ["desc"],
-        "USEFORMULA": "allow"
+        "USEFORMULA": "allow",
+        "FILTER": {
+          "FRAGMENT": "$aasdesc#idShort",
+          "USEFORMULA": "allow"
+        }
       }
     ]
   }
@@ -105,7 +109,11 @@ func TestSchemaValidationMatrix(t *testing.T) {
           "ACCESS": "ALLOW"
         },
         "OBJECTS": [{"ROUTE": "/description"}],
-        "FORMULA": {"$boolean": true}
+        "FORMULA": {"$boolean": true},
+        "FILTER": {
+          "FRAGMENT": "$aasdesc#idShort",
+          "CONDITION": {"$boolean": true}
+        }
       }
     ]
   }
@@ -121,9 +129,11 @@ func TestSchemaValidationMatrix(t *testing.T) {
         "USEACL": "read_public",
         "USEOBJECTS": ["desc"],
         "USEFORMULA": "allow",
-        "FRAGMENT": "$aasdesc#idShort",
         "FILTER": {
-          "$starts-with": [{"$field": "$aasdesc#idShort"}, {"$strVal": "A"}]
+          "FRAGMENT": "$aasdesc#idShort",
+          "CONDITION": {
+            "$starts-with": [{"$field": "$aasdesc#idShort"}, {"$strVal": "A"}]
+          }
         }
       }
     ]
@@ -140,8 +150,10 @@ func TestSchemaValidationMatrix(t *testing.T) {
         "USEACL": "read_public",
         "USEOBJECTS": ["desc"],
         "USEFORMULA": "allow",
-        "FRAGMENT": "$aasdesc#idShort",
-        "USEFILTER": "namedFilter"
+        "FILTER": {
+          "FRAGMENT": "$aasdesc#idShort",
+          "USEFORMULA": "namedFilter"
+        }
       }
     ]
   }
@@ -157,10 +169,14 @@ func TestSchemaValidationMatrix(t *testing.T) {
         "USEACL": "read_public",
         "USEOBJECTS": ["desc"],
         "USEFORMULA": "allow",
+        "FILTER": {
+          "FRAGMENT": "$aasdesc#idShort",
+          "CONDITION": {"$boolean": true}
+        },
         "FILTERLIST": [
           {
             "FRAGMENT": "$aasdesc#displayName",
-            "FILTER": {"$boolean": true}
+            "CONDITION": {"$boolean": true}
           }
         ]
       }
@@ -178,10 +194,14 @@ func TestSchemaValidationMatrix(t *testing.T) {
         "USEACL": "read_public",
         "USEOBJECTS": ["desc"],
         "USEFORMULA": "allow",
+        "FILTER": {
+          "FRAGMENT": "$aasdesc#idShort",
+          "USEFORMULA": "allow"
+        },
         "FILTERLIST": [
           {
             "FRAGMENT": "$aasdesc#displayName",
-            "USEFILTER": "namedFilter"
+            "USEFORMULA": "namedFilter"
           }
         ]
       }
@@ -191,7 +211,7 @@ func TestSchemaValidationMatrix(t *testing.T) {
 			valid: true,
 		},
 		{
-			name: "invalid fragment without filter",
+			name: "invalid filter without condition",
 			payload: `{
   "AllAccessPermissionRules": {
     "rules": [
@@ -199,7 +219,9 @@ func TestSchemaValidationMatrix(t *testing.T) {
         "USEACL": "read_public",
         "USEOBJECTS": ["desc"],
         "USEFORMULA": "allow",
-        "FRAGMENT": "$aasdesc#idShort"
+        "FILTER": {
+          "FRAGMENT": "$aasdesc#idShort"
+        }
       }
     ]
   }
@@ -215,6 +237,10 @@ func TestSchemaValidationMatrix(t *testing.T) {
         "USEACL": "read_public",
         "USEOBJECTS": ["desc"],
         "USEFORMULA": "allow",
+        "FILTER": {
+          "FRAGMENT": "$aasdesc#idShort",
+          "USEFORMULA": "allow"
+        },
         "FILTERLIST": [
           {
             "FRAGMENT": "$aasdesc#displayName"
@@ -239,7 +265,11 @@ func TestSchemaValidationMatrix(t *testing.T) {
         },
         "USEACL": "read_public",
         "USEOBJECTS": ["desc"],
-        "USEFORMULA": "allow"
+        "USEFORMULA": "allow",
+        "FILTER": {
+          "FRAGMENT": "$aasdesc#idShort",
+          "USEFORMULA": "allow"
+        }
       }
     ]
   }
@@ -259,6 +289,10 @@ func TestSchemaValidationMatrix(t *testing.T) {
             {"$field": "$bd#idShort"},
             {"$strVal": "x"}
           ]
+        },
+        "FILTER": {
+          "FRAGMENT": "$aasdesc#idShort",
+          "CONDITION": {"$boolean": true}
         }
       }
     ]

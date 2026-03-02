@@ -1,10 +1,14 @@
 {
-    "Query": {
-        "$condition": {
-            "$eq": [
-                { "$field": "$sm#semanticId.keys[1].type" },
-                { "$strVal": "Property" } 
-            ]
+  "Query": {
+    "$condition": {
+      "$eq": [
+        {
+          "$field": "$sm#semanticId.keys[1].type"
+        },
+        {
+          "$strVal": "Property"
         }
+      ]
     }
+  }
 }
