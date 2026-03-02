@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'internal/common/**/*.go'
+      - 'internal/common/security/schema_tests/**'
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/common-tests.yml'
@@ -11,6 +12,7 @@ on:
     branches: [main]
     paths:
       - 'internal/common/**/*.go'
+      - 'internal/common/security/schema_tests/**'
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/common-tests.yml'
@@ -52,4 +54,9 @@ jobs:
       - name: Run common security filter tests
         run: |
           cd internal/common/security/unit_tests/filter_abac_engine
+          go test -count=1 -v -cover
+
+      - name: Run common security schema tests
+        run: |
+          cd internal/common/security/schema_tests
           go test -count=1 -v -cover
