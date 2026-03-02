@@ -693,9 +693,6 @@
           }
         }
       },
-      "required": [
-        "FILTER"
-      ],
       "allOf": [
         {
           "oneOf": [
