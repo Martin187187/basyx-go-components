@@ -1,0 +1,13 @@
+repository: .
+sourceRevision: workspace
+timeoutSeconds: 30
+maxResponseBytes: 1048576
+
+# API roots may include a service context path. Only configured targets are used.
+# tokenEnv names a process environment variable; keep access tokens out of YAML.
+environments:
+  demo:
+    submodelrepositoryservice:
+      url: http://localhost:5004
+      tokenEnv: ""
+      allowWrites: false

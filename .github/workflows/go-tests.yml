@@ -9,7 +9,8 @@ on:
       - '.github/workflows/go-tests.yml'
       - '**.sql'
       - 'internal/**/*.json'
-      - 'cmd/aasxfileserverservice/openapi.yaml'
+      - 'cmd/**/openapi.yaml'
+      - 'internal/common/swagger_*_schemas/**/*.yaml'
   push:
     branches: [main]
     paths:
@@ -19,12 +20,31 @@ on:
       - '.github/workflows/go-tests.yml'
       - '**.sql'
       - 'internal/**/*.json'
-      - 'cmd/aasxfileserverservice/openapi.yaml'
+      - 'cmd/**/openapi.yaml'
+      - 'internal/common/swagger_*_schemas/**/*.yaml'
 
 permissions:
   contents: read
 
 jobs:
+  basyx-mcp-integration-tests:
+    name: BaSyx MCP Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run MCP integration tests
+        run: |
+          go clean -testcache
+          go test -v ./internal/mcpservice/... ./cmd/basyxmcpservice
+
   discovery-service-security-tests:
     name: Discovery Service Security Tests
     runs-on: ubuntu-latest
