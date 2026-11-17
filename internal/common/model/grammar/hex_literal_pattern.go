@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -25,12 +25,15 @@
 
 // Package grammar defines the data structures for representing hex literal patterns in the grammar model.
 // Author: Aaron Zielstorff ( Fraunhofer IESE ), Jannik Fried ( Fraunhofer IESE )
+//
+//nolint:all
 package grammar
 
 import (
-	"encoding/json"
 	"fmt"
 	"regexp"
+
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
 )
 
 // HexLiteralPattern represents a hexadecimal literal in the AAS grammar.
@@ -70,7 +73,7 @@ type HexLiteralPattern string
 func (j *HexLiteralPattern) UnmarshalJSON(value []byte) error {
 	type Plain HexLiteralPattern
 	var plain Plain
-	if err := json.Unmarshal(value, &plain); err != nil {
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &plain); err != nil {
 		return err
 	}
 	if matched, _ := regexp.MatchString(`^16#[0-9A-F]+$`, string(plain)); !matched {

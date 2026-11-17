@@ -1,0 +1,28 @@
+{
+  "paging_metadata": {},
+    "result": [
+        
+    {
+      "id": "https://example.org/X/SM-D",
+      "supplementalSemanticIds": [
+        {
+          "type": "ExternalReference",
+          "keys": [
+            {
+              "type": "GlobalReference",
+              "value": "WRITTEN_BY_X"
+            }
+          ]
+        }
+      ],
+      "endpoints": [
+        {
+          "interface": "AAS-3.0",
+          "protocolInformation": {
+            "href": "https://endpoint.example/manufacturer"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -33,15 +33,24 @@
 //   - ABAC policy-based authorization
 //   - Configurable security middleware for Chi routers
 //   - Role-based access control through JWT claims
+//
+// Author: Martin Stemmer ( Fraunhofer IESE )
 package auth
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"os"
+	"strings"
 
 	"github.com/eclipse-basyx/basyx-go-components/internal/common"
-	"github.com/go-chi/chi/v5"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/eventfeed"
+	api "github.com/go-chi/chi/v5"
 )
+
+const abacManagementDeniedAsNotFoundPath = "/security/abac"
 
 // SetupSecurity configures and applies security middleware to a Chi router
 // based on the provided configuration. It sets up OIDC authentication and
@@ -67,55 +76,215 @@ import (
 //	router := chi.NewRouter()
 //	config := &common.Config{
 //	  ABAC: common.ABACConfig{Enabled: true, ModelPath: "access_model.json"},
-//	  OIDC: common.OIDCConfig{Issuer: "https://auth.example.com", Audience: "api"},
+//	  OIDC: common.OIDCConfig{TrustlistPath: "config/trustlist.json"},
 //	}
 //	err := SetupSecurity(context.Background(), config, router)
 //	if err != nil {
-//	  log.Fatal("Security setup failed:", err)
+//	  return err
 //	}
 //
 // Security Flow:
 //  1. Incoming requests are first processed by OIDC middleware for authentication
 //  2. Authenticated requests are then evaluated by ABAC middleware for authorization
 //  3. Only requests that pass both checks are allowed to proceed to handlers
-func SetupSecurity(ctx context.Context, cfg *common.Config, r chi.Router) error {
+func SetupSecurity(ctx context.Context, cfg *common.Config, r *api.Mux) error {
+	return SetupSecurityWithClaimsMiddleware(ctx, cfg, r)
+}
+
+// SetupSecurityWithClaimsMiddleware configures security and optionally injects
+// middleware between OIDC and ABAC (e.g., to enrich claims).
+func SetupSecurityWithClaimsMiddleware(
+	ctx context.Context,
+	cfg *common.Config,
+	r *api.Mux,
+	claimsMiddleware ...func(http.Handler) http.Handler,
+) error {
+	return SetupSecurityWithFileModel(ctx, cfg, r, SecurityExtensions{}, claimsMiddleware...)
+}
+
+// SetupSecurityWithFileModel configures OIDC and ABAC with the access model
+// file of cfg and optional authorization extensions.
+func SetupSecurityWithFileModel(
+	ctx context.Context,
+	cfg *common.Config,
+	r *api.Mux,
+	extensions SecurityExtensions,
+	claimsMiddleware ...func(http.Handler) http.Handler,
+) error {
 	if !cfg.ABAC.Enabled {
+		eventfeed.SetRecordAuthorizer(nil)
 		return nil
 	}
-
-	oidc, err := NewOIDC(ctx, OIDCSettings{
-		Issuer:         cfg.OIDC.Issuer,
-		Audience:       cfg.OIDC.Audience,
-		AllowAnonymous: true,
-	})
+	model, err := loadFileAccessModel(cfg, r)
 	if err != nil {
 		return err
 	}
+	return SetupSecurityWithExtensions(ctx, cfg, r, model, extensions, claimsMiddleware...)
+}
 
-	var model *AccessModel
-	if cfg.ABAC.ModelPath != "" {
-		data, err := os.ReadFile(cfg.ABAC.ModelPath)
-		if err != nil {
-			return err
-		}
-		m, err := ParseAccessModel(data)
-		if err != nil {
-			return err
-		}
-		model = m
+func loadFileAccessModel(cfg *common.Config, r *api.Mux) (*AccessModel, error) {
+	if cfg.ABAC.ModelPath == "" {
+		return nil, nil
 	}
+	data, err := os.ReadFile(cfg.ABAC.ModelPath)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAccessModel(data, r, cfg.Server.ContextPath)
+}
 
+// SetupSecurityWithAccessModelProvider configures security with a dynamic ABAC
+// model provider.
+//
+// Repository-backed deployments call this after importing/loading the active
+// database policy. The provider is read for every request, allowing policy
+// activation to refresh the in-memory model without rebuilding the HTTP router.
+func SetupSecurityWithAccessModelProvider(
+	ctx context.Context,
+	cfg *common.Config,
+	r *api.Mux,
+	provider AccessModelProvider,
+	claimsMiddleware ...func(http.Handler) http.Handler,
+) error {
+	return SetupSecurityWithExtensions(ctx, cfg, r, provider, SecurityExtensions{}, claimsMiddleware...)
+}
+
+// SecurityExtensions carries optional authorization extensions that widen
+// ABAC decisions. The zero value keeps ABAC-only behavior.
+type SecurityExtensions struct {
+	// ReBAC adds relationship-based grants as a strict union with ABAC.
+	ReBAC ReBACResolver
+}
+
+// SetupSecurityWithExtensions configures OIDC and ABAC with a dynamic model
+// provider and optional authorization extensions.
+func SetupSecurityWithExtensions(
+	ctx context.Context,
+	cfg *common.Config,
+	r *api.Mux,
+	provider AccessModelProvider,
+	extensions SecurityExtensions,
+	claimsMiddleware ...func(http.Handler) http.Handler,
+) error {
+	if !cfg.ABAC.Enabled {
+		eventfeed.SetRecordAuthorizer(nil)
+		return nil
+	}
+	oidc, err := setupOIDC(ctx, cfg)
+	if err != nil {
+		return err
+	}
 	abacSettings := ABACSettings{
-		Enabled:             cfg.ABAC.Enabled,
-		ClientRolesAudience: cfg.ABAC.ClientRolesAudience,
-		Model:               model,
+		Enabled:                cfg.ABAC.Enabled,
+		EnableImplicitCasts:    cfg.General.EnableImplicitCasts,
+		ModelProvider:          provider,
+		DenyAsNotFoundPrefixes: abacDeniedAsNotFoundPrefixes(cfg.Server.ContextPath),
+		ReBAC:                  extensions.ReBAC,
+	}
+	if binder, ok := extensions.ReBAC.(ABACModelBinder); ok {
+		binder.BindABAC(provider, cfg.General.EnableImplicitCasts)
+	}
+	applySecurityMiddleware(r, oidc.Middleware, ABACMiddleware(abacSettings), claimsMiddleware...)
+	BindEventFeedAuthorizer(abacSettings)
+	return nil
+}
+
+func abacDeniedAsNotFoundPrefixes(contextPath string) []string {
+	contextPath = strings.Trim(strings.TrimSpace(contextPath), "/")
+	if contextPath == "" {
+		return []string{abacManagementDeniedAsNotFoundPath}
+	}
+	return []string{
+		abacManagementDeniedAsNotFoundPath,
+		"/" + contextPath + abacManagementDeniedAsNotFoundPath,
+	}
+}
+
+func setupOIDC(ctx context.Context, cfg *common.Config) (*OIDC, error) {
+	trustlist, err := readTrustlist(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return newOIDCFromTrustlist(ctx, trustlist)
+}
+
+func readTrustlist(cfg *common.Config) ([]common.OIDCProviderConfig, error) {
+	trustlistData, err := os.ReadFile(cfg.OIDC.TrustlistPath)
+	if err != nil {
+		return nil, fmt.Errorf("read OIDC trustlist: %w", err)
 	}
 
-	// ✅ Apply both middlewares to the router
-	r.Use(
-		oidc.Middleware,
-		ABACMiddleware(abacSettings),
-	)
+	var trustlist []common.OIDCProviderConfig
+	if err := json.Unmarshal(trustlistData, &trustlist); err != nil {
+		return nil, fmt.Errorf("parse OIDC trustlist: %w", err)
+	}
+	return trustlist, nil
+}
 
-	return nil
+func newOIDCFromTrustlist(ctx context.Context, trustlist []common.OIDCProviderConfig) (*OIDC, error) {
+	oidcProviders := make([]OIDCProviderSettings, 0, len(trustlist))
+	for _, p := range trustlist {
+		oidcProviders = append(oidcProviders, OIDCProviderSettings{
+			Issuer:        p.Issuer,
+			Audience:      p.Audience,
+			Scopes:        p.Scopes,
+			DiscoveryURL:  p.DiscoveryURL,
+			ScopeClaims:   p.ScopeClaims,
+			ClaimMappings: toClaimMappingSettings(p.ClaimMappings),
+		})
+	}
+
+	return NewOIDC(ctx, OIDCSettings{
+		Providers:      oidcProviders,
+		AllowAnonymous: true,
+	})
+}
+
+func applySecurityMiddleware(
+	r *api.Mux,
+	oidcMiddleware func(http.Handler) http.Handler,
+	abacMiddleware func(http.Handler) http.Handler,
+	claimsMiddleware ...func(http.Handler) http.Handler,
+) {
+	if len(claimsMiddleware) > 0 {
+		chain := append([]func(http.Handler) http.Handler{oidcMiddleware}, claimsMiddleware...)
+		chain = append(chain, abacMiddleware)
+		r.Use(chain...)
+		return
+	}
+
+	r.Use(oidcMiddleware, abacMiddleware)
+}
+
+func toClaimMappingSettings(configs []common.OIDCClaimMappingConfig) []OIDCClaimMappingSettings {
+	settings := make([]OIDCClaimMappingSettings, 0, len(configs))
+	for _, config := range configs {
+		settings = append(settings, OIDCClaimMappingSettings{
+			Target:  config.Target,
+			Mode:    config.Mode,
+			Sources: config.Sources,
+		})
+	}
+	return settings
+}
+
+// NewAudienceBoundOIDC builds token verification from the REST trustlist for a transport that requires
+// audience-bound tokens, such as MCP. It also returns the trusted issuers as authorization servers.
+func NewAudienceBoundOIDC(ctx context.Context, cfg *common.Config) (*OIDC, []string, error) {
+	trustlist, err := readTrustlist(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	issuers := make([]string, 0, len(trustlist))
+	for _, p := range trustlist {
+		if strings.TrimSpace(p.Audience) == "" {
+			return nil, nil, fmt.Errorf("SECURITY-NEWAUDIENCEOIDC-AUDIENCE: trusted issuer %q requires an audience", p.Issuer)
+		}
+		issuers = append(issuers, p.Issuer)
+	}
+	oidc, err := newOIDCFromTrustlist(ctx, trustlist)
+	if err != nil {
+		return nil, nil, err
+	}
+	return oidc, issuers, nil
 }

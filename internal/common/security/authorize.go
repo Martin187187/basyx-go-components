@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -22,34 +22,37 @@
 *
 * SPDX-License-Identifier: MIT
 ******************************************************************************/
-
-// Package auth provides ABAC (Attribute-Based Access Control) middleware and
-// helper utilities to enforce fine-grained authorization rules in BaSyx
-// services.
 // Author: Martin Stemmer ( Fraunhofer IESE )
+
 package auth
 
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
-	"time"
+	"strings"
 
 	"github.com/eclipse-basyx/basyx-go-components/internal/common"
-	openapi "github.com/eclipse-basyx/basyx-go-components/pkg/discoveryapi"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model/grammar"
 )
 
 // ABACSettings defines the configuration used to enable and control
 // Attribute-Based Access Control.
 //
 // Enabled: toggles ABAC enforcement.
-// ClientRolesAudience: defines the expected client audience for role validation.
 // Model: provides the AccessModel that evaluates authorization rules.
 type ABACSettings struct {
 	Enabled             bool
-	ClientRolesAudience string
+	EnableImplicitCasts bool
 	Model               *AccessModel
+	ModelProvider       AccessModelProvider
+	// DenyAsNotFoundPrefixes hides denied requests below sensitive route
+	// prefixes by returning 404 instead of 403.
+	DenyAsNotFoundPrefixes []string
+	// ReBAC optionally adds relationship-based grants for covered routes that
+	// ABAC does not allow unconditionally. Nil keeps ABAC-only behavior.
+	ReBAC ReBACResolver
 }
 
 // Resource represents the target object of an authorization request.
@@ -63,26 +66,34 @@ type Resource struct {
 	Attrs  map[string]any
 }
 
-// Input bundles subject claims, action, and resource for ABAC evaluation.
-type Input struct {
-	Subject  Claims
-	Action   string
-	Resource Resource
-	Env      Env
-}
-
-// Env represents environmental authorization context (e.g., current UTC).
-type Env struct {
-	UTCNow time.Time
-}
-
 const (
 	// filterKey stores query filter restrictions inside the request context.
 	filterKey ctxKey = "queryFilter"
+	// authorizationDecisionKey stores the ABAC decision made for the request.
+	authorizationDecisionKey ctxKey = "authorizationDecision"
+	// selectedFormulaRightKey records the right selected for an upsert operation.
+	selectedFormulaRightKey ctxKey = "selectedFormulaRight"
 )
 
 // ResolveResource extracts a Resource from an HTTP request.
 type ResolveResource func(r *http.Request) (Resource, error)
+
+// AuthorizationDecision records the ABAC decision available to audit middleware.
+type AuthorizationDecision struct {
+	Result        string
+	PolicyID      string
+	MatchedRuleID string
+}
+
+// AccessModelProvider supplies the currently active compiled ABAC model.
+//
+// Implementations are expected to be concurrency-safe because the ABAC
+// middleware calls ActiveAccessModel for every protected request. Repository
+// backed deployments use this hook to atomically swap compiled policies only
+// after a policy activation transaction commits.
+type AccessModelProvider interface {
+	ActiveAccessModel() *AccessModel
+}
 
 // ABACMiddleware returns an HTTP middleware handler that enforces attribute-based
 // authorization based on the provided ABACSettings.
@@ -91,7 +102,6 @@ type ResolveResource func(r *http.Request) (Resource, error)
 // If enabled, Claims must be present in context or the request is rejected.
 // If the model denies access, a 403 Forbidden is returned.
 func ABACMiddleware(settings ABACSettings) func(http.Handler) http.Handler {
-
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !settings.Enabled {
@@ -99,63 +109,434 @@ func ABACMiddleware(settings ABACSettings) func(http.Handler) http.Handler {
 				return
 			}
 
+			policyPath, err := canonicalAuthorizationPath(r.URL)
+			if err != nil {
+				_ = common.WriteErrorResponse(w, err, http.StatusBadRequest, "Middleware", "ABACMiddleware", "InvalidPath")
+				return
+			}
+
 			claims := FromContext(r)
 			if claims == nil {
-				http.Error(w, "missing claims context", http.StatusUnauthorized)
+				_ = common.WriteErrorResponse(
+					w,
+					errors.New("missing claims context"),
+					http.StatusUnauthorized,
+					"Middleware",
+					"ABACMiddleware",
+					"MissingClaims",
+				)
 				return
 			}
 
-			if settings.Model != nil {
-				ok, reason, qf := settings.Model.AuthorizeWithFilter(EvalInput{
-					Method:    r.Method,
-					Path:      r.URL.Path,
-					Claims:    claims,
-					IssuedUTC: time.Now().UTC(),
-				})
-				if !ok {
-					log.Printf("❌ ABAC(model): %s", reason)
-
-					resp := common.NewErrorResponse(errors.New("access denied"), http.StatusForbidden, "Middleware", "Rules", "Denied")
-					err := openapi.EncodeJSONResponse(resp.Body, &resp.Code, w)
-					if err != nil {
-						log.Printf("❌ Failed to encode error response: %v", err)
-						http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-					}
-					return
-				}
-
-				ctx := r.Context()
-				if qf != nil {
-					ctx = context.WithValue(ctx, filterKey, qf)
-				}
-				next.ServeHTTP(w, r.WithContext(ctx))
+			model := activeAccessModel(settings)
+			if model == nil {
+				_ = common.WriteErrorResponse(
+					w,
+					errors.New("resource resolution failed"),
+					http.StatusForbidden,
+					"Middleware",
+					"ABACMiddleware",
+					"ResourceResolution",
+				)
 				return
 			}
-
-			http.Error(w, "resource resolution failed", http.StatusForbidden)
+			serveAuthorizedRequest(w, r, next, settings, model, claims, policyPath)
 		})
 	}
 }
 
-// FromFilter returns a QueryFilter previously stored in the request context.
-// It is used to enforce policy-induced restrictions on downstream queries.
-// TODO: use this helper in backend if you need further restriction
-func FromFilter(r *http.Request) *QueryFilter {
-	if v := r.Context().Value(filterKey); v != nil {
-		if f, ok := v.(*QueryFilter); ok {
-			return f
-		}
+// serveAuthorizedRequest evaluates the request. policyPath is the canonical
+// authorization path matched against ROUTE patterns; routePath is the path the
+// router matches and is used to map the request to rights.
+func serveAuthorizedRequest(
+	w http.ResponseWriter,
+	r *http.Request,
+	next http.Handler,
+	settings ABACSettings,
+	model *AccessModel,
+	claims Claims,
+	policyPath string,
+) {
+	routePath := r.URL.Path
+	if r.URL.RawPath != "" {
+		routePath = r.URL.RawPath
 	}
-	return nil
+	opts := grammar.DefaultSimplifyOptions()
+	opts.EnableImplicitCasts = settings.EnableImplicitCasts
+	session := newAuthorizationSession(model, claims, nil, opts)
+	evaluation := session.evaluate(r.Method, policyPath)
+	if policyPath != routePath {
+		evaluation = model.AuthorizeWithFilterWithOptions(EvalInput{
+			Method:    r.Method,
+			Path:      policyPath,
+			RoutePath: routePath,
+			Claims:    session.claims,
+			Globals:   session.globals,
+		}, opts)
+	}
+
+	environment := session.evaluateEnvironment(r.Method, policyPath, routePath)
+	outcome, route, grants := resolveReBAC(r, settings, session, evaluation, routePath)
+	switch outcome {
+	case reBACOutcomeManagement:
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), reBACRouteContextKey{}, route)))
+		return
+	case reBACOutcomeUnavailable:
+		writeReBACUnavailable(w, r)
+		return
+	case reBACOutcomeGranted, reBACOutcomeEmptyList:
+		evaluation = reBACGrantedEvaluation(evaluation, route.Rights)
+	}
+
+	evaluation = environment.admit(evaluation)
+	if !evaluation.Allowed {
+		writeABACDenied(w, r, settings, model, evaluation, policyPath, routePath)
+		return
+	}
+
+	ctx := ContextWithAuthorizationDecision(r.Context(), AuthorizationDecision{
+		Result:        string(DecisionAllow),
+		PolicyID:      evaluation.PolicyID,
+		MatchedRuleID: decisionRuleID(evaluation.MatchedRuleID, outcome),
+	})
+	if evaluation.QueryFilter != nil {
+		ctx = context.WithValue(ctx, filterKey, evaluation.QueryFilter)
+	}
+	session = session.withOuterAccess(accessViewFromEvaluation("", evaluation))
+	ctx = context.WithValue(ctx, authorizationSessionContextKey{}, session)
+	if environment != nil {
+		ctx = context.WithValue(ctx, environmentAuthorizationContextKey{}, environment)
+	}
+	if outcome == reBACOutcomeGranted {
+		ctx = context.WithValue(WithReBACGrants(ctx, grants), reBACRouteContextKey{}, route)
+	}
+	if state, ok := settings.ReBAC.(ReBACState); ok {
+		ctx = WithReBACState(ctx, state)
+	}
+
+	next.ServeHTTP(w, r.WithContext(ctx))
 }
 
-// FromFilterCtx extracts a QueryFilter directly from a context instance.
-// TODO: use this helper in backend if you need further restriction
-func FromFilterCtx(ctx context.Context) *QueryFilter {
+func decisionRuleID(matchedRuleID string, outcome reBACOutcome) string {
+	if outcome != reBACOutcomeGranted || matchedRuleID == ReBACDecisionRuleID {
+		return matchedRuleID
+	}
+	if matchedRuleID == "" {
+		return ReBACDecisionRuleID
+	}
+	return matchedRuleID + "," + ReBACDecisionRuleID
+}
+
+func writeABACDenied(
+	w http.ResponseWriter,
+	r *http.Request,
+	settings ABACSettings,
+	model *AccessModel,
+	evaluation AuthorizationEvaluation,
+	policyPath string,
+	routePath string,
+) {
+	if evaluation.Reason == DecisionRouteNotFound {
+		component := routerErrorComponent(model)
+		if model.routeExistsForAnyMethod(routePath) {
+			common.WriteRouterMethodNotAllowed(w, component)
+			return
+		}
+		common.WriteRouterNotFound(w, component)
+		return
+	}
+	if denyAsNotFound(settings, policyPath) {
+		common.WriteRouterNotFound(w, routerErrorComponent(model))
+		return
+	}
+
+	slog.ErrorContext(
+		r.Context(),
+		"ABAC access denied",
+		"error.code", "SECURITY-ABACMIDDLEWARE-DENIED",
+		"reason", evaluation.Reason,
+	)
+
+	if err := common.WriteErrorResponse(w, errors.New("access denied"), http.StatusForbidden, "Middleware", "Rules", "Denied"); err != nil {
+		slog.ErrorContext(r.Context(), "access denial response encoding failed", "error.code", "SECURITY-ABACMIDDLEWARE-ENCODERESPONSE", "error", err)
+	}
+}
+
+func denyAsNotFound(settings ABACSettings, requestPath string) bool {
+	for _, prefix := range settings.DenyAsNotFoundPrefixes {
+		if pathMatchesPrefix(requestPath, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathMatchesPrefix(requestPath string, prefix string) bool {
+	cleanPath := "/" + strings.Trim(strings.TrimSpace(requestPath), "/")
+	cleanPrefix := "/" + strings.Trim(strings.TrimSpace(prefix), "/")
+	if cleanPrefix == "/" {
+		return false
+	}
+	return cleanPath == cleanPrefix || strings.HasPrefix(cleanPath, cleanPrefix+"/")
+}
+
+func activeAccessModel(settings ABACSettings) *AccessModel {
+	if settings.ModelProvider != nil {
+		return settings.ModelProvider.ActiveAccessModel()
+	}
+	return settings.Model
+}
+
+func routerErrorComponent(model *AccessModel) string {
+	if component := common.RouterErrorComponent(model.apiRouter); component != "" {
+		return component
+	}
+	return "Middleware"
+}
+
+// ContextWithAuthorizationDecision stores an evaluated ABAC decision in ctx.
+//
+// The helper is used after authorization has already been evaluated, typically
+// by ABACMiddleware. Downstream middleware can then read the decision with
+// AuthorizationDecisionFromContext and copy the result or matched rule id into
+// audit metadata. The helper does not evaluate policies and does not grant
+// access by itself.
+//
+// Parameters:
+//   - ctx: Non-nil context to extend with decision metadata.
+//   - decision: Evaluated authorization result to make available downstream.
+//
+// Returns:
+//   - context.Context: Context containing the authorization decision.
+func ContextWithAuthorizationDecision(ctx context.Context, decision AuthorizationDecision) context.Context {
+	return context.WithValue(ctx, authorizationDecisionKey, decision)
+}
+
+// AuthorizationDecisionFromContext returns an evaluated ABAC decision from ctx.
+//
+// The boolean return value is false when ctx is nil or no decision was stored
+// with ContextWithAuthorizationDecision. Callers should treat that case as
+// "decision unavailable" and must not infer an allow or deny result from it.
+// History audit enrichment uses this helper to copy available authorization
+// metadata into audit rows without coupling history storage to the ABAC engine.
+//
+// Parameters:
+//   - ctx: Context that may contain an evaluated authorization decision.
+//
+// Returns:
+//   - AuthorizationDecision: Stored decision metadata, or the zero value when
+//     unavailable.
+//   - bool: True when decision metadata was present in ctx.
+func AuthorizationDecisionFromContext(ctx context.Context) (AuthorizationDecision, bool) {
+	if ctx == nil {
+		return AuthorizationDecision{}, false
+	}
+	decision, ok := ctx.Value(authorizationDecisionKey).(AuthorizationDecision)
+	return decision, ok
+}
+
+// GetQueryFilter extracts a *QueryFilter from the provided context.
+// It returns nil if no QueryFilter is stored under the filterKey.
+//
+// This helper can be used from any point in the codebase where the
+// QueryFilter is needed. The returned filter may still require additional
+// processing (e.g., building the actual AASQL expression) depending on the
+// specific component using it.
+func GetQueryFilter(ctx context.Context) *QueryFilter {
 	if v := ctx.Value(filterKey); v != nil {
 		if f, ok := v.(*QueryFilter); ok {
 			return f
 		}
 	}
 	return nil
+}
+
+// ContextWithoutQueryFilter preserves request cancellation and identity while
+// suppressing query projection for an internal state read. Callers must perform
+// authorization separately; the returned context must never be used for an
+// authorization decision or API response construction.
+func ContextWithoutQueryFilter(ctx context.Context) context.Context {
+	return context.WithValue(ctx, filterKey, (*QueryFilter)(nil))
+}
+
+// ShouldEnforceFormula determines whether formula-based query constraints must
+// run for the current request context.
+//
+// Returns false when no QueryFilter is available.
+// Returns an error when configuration is missing from context while ABAC
+// enforcement decision is required, or when an inconsistent QueryFilter is
+// detected (Formula is set but FormulasByRight is empty).
+func ShouldEnforceFormula(ctx context.Context) (bool, error) {
+	cfg, ok := common.ConfigFromContext(ctx)
+	if !ok {
+		// return true to be safe in case of misconfiguration, but also return an error to allow proper logging and debugging
+		return true, errors.New("configuration not found in context")
+	}
+	queryFilter := GetQueryFilter(ctx)
+
+	// security has no further constraints
+	if queryFilter == nil {
+		return false, nil
+	}
+
+	if queryFilter.Formula != nil && len(queryFilter.FormulasByRight) == 0 {
+		return true, errors.New("inconsistent QueryFilter: Formula is set but FormulasByRight is empty")
+	}
+
+	if len(queryFilter.FormulasByRight) > 0 {
+		return true, nil
+	}
+
+	if !cfg.ABAC.Enabled {
+		return false, nil
+	}
+
+	return len(queryFilter.FormulasByRight) > 0, nil
+}
+
+// HasUnrestrictedFormulaForRight returns true when the right-scoped formula in
+// context is a boolean true literal.
+func HasUnrestrictedFormulaForRight(ctx context.Context, right grammar.RightsEnum) bool {
+	qf := GetQueryFilter(ctx)
+	if qf == nil || qf.FormulasByRight == nil {
+		return false
+	}
+
+	expr, ok := qf.FormulasByRight[right]
+	if !ok || expr.Boolean == nil {
+		return false
+	}
+
+	return *expr.Boolean
+}
+
+// SelectFormulaForRight selects the active QueryFilter.Formula for the requested right.
+func SelectFormulaForRight(ctx context.Context, right grammar.RightsEnum) context.Context {
+	existing := GetQueryFilter(ctx)
+	if existing == nil {
+		return context.WithValue(ctx, selectedFormulaRightKey, right)
+	}
+
+	qf, cloneErr := CloneQueryFilter(existing)
+	if cloneErr != nil {
+		slog.ErrorContext(ctx, "query filter clone failed", "error.code", "AUTH-SELECTQF-CLONEERR", "error", cloneErr)
+		return context.WithValue(WithQueryFilter(ctx, failClosedQueryFilter(right)), selectedFormulaRightKey, right)
+	}
+	if qf == nil {
+		return context.WithValue(WithQueryFilter(ctx, failClosedQueryFilter(right)), selectedFormulaRightKey, right)
+	}
+
+	if qf.FormulasByRight == nil {
+		qf.FormulasByRight = make(map[grammar.RightsEnum]grammar.LogicalExpression)
+		fallback := boolExpression(false)
+		qf.FormulasByRight[right] = fallback
+		qf.Formula = &fallback
+		return context.WithValue(WithQueryFilter(ctx, qf), selectedFormulaRightKey, right)
+	}
+
+	if selected, ok := qf.FormulasByRight[right]; ok {
+		qf.Formula = &selected
+		return context.WithValue(WithQueryFilter(ctx, qf), selectedFormulaRightKey, right)
+	}
+
+	fallback := boolExpression(false)
+	qf.FormulasByRight[right] = fallback
+	qf.Formula = &fallback
+	return context.WithValue(WithQueryFilter(ctx, qf), selectedFormulaRightKey, right)
+}
+
+// SelectedFormulaRight returns the right selected for an upsert formula.
+func SelectedFormulaRight(ctx context.Context) (grammar.RightsEnum, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	right, ok := ctx.Value(selectedFormulaRightKey).(grammar.RightsEnum)
+	return right, ok
+}
+
+// MergeQueryFilter combines an existing QueryFilter with a user query.
+// It guards nils and merges conditions and filter fragments using logical AND.
+func MergeQueryFilter(ctx context.Context, query grammar.Query) context.Context {
+	existing := GetQueryFilter(ctx)
+	qf := &QueryFilter{}
+	if existing != nil {
+		cloned, err := CloneQueryFilter(existing)
+		if err != nil {
+			slog.ErrorContext(ctx, "query filter clone failed", "error.code", "SMREPO-MERGEQF-CLONEERR", "error", err)
+			return WithQueryFilter(ctx, failClosedQueryFilter(grammar.RightsEnumREAD))
+		}
+		if cloned != nil {
+			qf = cloned
+		}
+	}
+
+	resolver := func(grammar.AttributeValue) any { return nil }
+	opts := grammar.DefaultSimplifyOptions()
+	if cfg, ok := common.ConfigFromContext(ctx); ok {
+		opts.EnableImplicitCasts = cfg.General.EnableImplicitCasts
+	}
+
+	if query.Condition != nil {
+		if qf.FormulasByRight == nil {
+			qf.FormulasByRight = make(map[grammar.RightsEnum]grammar.LogicalExpression)
+		}
+		if qf.Formula != nil {
+			combinedQuery := grammar.LogicalExpression{And: []grammar.LogicalExpression{*qf.Formula, *query.Condition}}
+			combinedQuery, _ = combinedQuery.SimplifyForBackendFilterWithOptions(resolver, opts)
+			qf.FormulasByRight[grammar.RightsEnumREAD] = combinedQuery
+			qf.Formula = &combinedQuery
+		} else {
+			simplifiedQuery, _ := query.Condition.SimplifyForBackendFilterWithOptions(resolver, opts)
+			qf.FormulasByRight[grammar.RightsEnumREAD] = simplifiedQuery
+			qf.Formula = &simplifiedQuery
+		}
+	}
+
+	for _, filterCond := range query.FilterConditions {
+		if filterCond.Fragment == nil || filterCond.Condition == nil {
+			continue
+		}
+		if qf.Filters == nil {
+			qf.Filters = make(FragmentFilters)
+		}
+		matchMode := filterCond.Match != nil && *filterCond.Match
+		simplifiedQuery, _ := filterCond.Condition.SimplifyForBackendFilterWithOptions(resolver, opts)
+		requestPredicate := NewFragmentFilterPredicate(simplifiedQuery, matchMode)
+		if existing, ok := qf.Filters[*filterCond.Fragment]; ok {
+			qf.Filters[*filterCond.Fragment] = AndFragmentFilterPredicates(existing, requestPredicate)
+		} else {
+			qf.Filters[*filterCond.Fragment] = requestPredicate
+		}
+	}
+
+	return WithQueryFilter(ctx, qf)
+}
+
+// SelectPutFormulaByExistence selects the active QueryFilter.Formula based on
+// PUT upsert semantics:
+//   - dataExists=true  -> UPDATE formula
+//   - dataExists=false -> CREATE formula
+//
+// If the requested right-specific formula is unavailable, Formula is set to a
+// constant false expression.
+func SelectPutFormulaByExistence(ctx context.Context, dataExists bool) context.Context {
+	right := grammar.RightsEnumCREATE
+	if dataExists {
+		right = grammar.RightsEnumUPDATE
+	}
+	return SelectFormulaForRight(ctx, right)
+}
+
+func failClosedQueryFilter(rights ...grammar.RightsEnum) *QueryFilter {
+	fallback := boolExpression(false)
+	qf := &QueryFilter{Formula: &fallback}
+	if len(rights) == 0 {
+		return qf
+	}
+
+	qf.FormulasByRight = make(map[grammar.RightsEnum]grammar.LogicalExpression, len(rights))
+	for _, right := range rights {
+		qf.FormulasByRight[right] = fallback
+	}
+	return qf
 }

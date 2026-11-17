@@ -307,7 +307,7 @@
                     },
                     "sourceOfDefinition": "IEC 61360-2",
                     "symbol": "kOhm",
-                    "dataType": "RealCount",
+                    "dataType": "REAL_COUNT",
                     "definition": [
                         {
                             "language": "en",
@@ -316,7 +316,7 @@
                     ],
                     "valueFormat": "##.##",
                     "valueList": {
-                        "valueReferencePair": [
+                        "valueReferencePairs": [
                             {
                                 "value": "100",
                                 "valueId": {
@@ -430,7 +430,7 @@
                     },
                     "sourceOfDefinition": "IEC 61360-2",
                     "symbol": "V",
-                    "dataType": "RealCount",
+                    "dataType": "REAL_COUNT",
                     "definition": [
                         {
                             "language": "en",
@@ -439,7 +439,7 @@
                     ],
                     "valueFormat": "##.##",
                     "valueList": {
-                        "valueReferencePair": [
+                        "valueReferencePairs": [
                             {
                                 "value": "10",
                                 "valueId": {
@@ -865,7 +865,7 @@
                 },
                 "sourceOfDefinition": "IEC 61360-2",
                 "symbol": "kOhm",
-                "dataType": "RealCount",
+                "dataType": "REAL_COUNT",
                 "definition": [
                     {
                         "language": "en",
@@ -874,7 +874,7 @@
                 ],
                 "valueFormat": "##.##",
                 "valueList": {
-                    "valueReferencePair": [
+                    "valueReferencePairs": [
                         {
                             "value": "100",
                             "valueId": {
@@ -988,7 +988,7 @@
                 },
                 "sourceOfDefinition": "IEC 61360-2",
                 "symbol": "V",
-                "dataType": "RealCount",
+                "dataType": "REAL_COUNT",
                 "definition": [
                     {
                         "language": "en",
@@ -997,7 +997,7 @@
                 ],
                 "valueFormat": "##.##",
                 "valueList": {
-                    "valueReferencePair": [
+                    "valueReferencePairs": [
                         {
                             "value": "13",
                             "valueId": {

@@ -1,0 +1,185 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
+package api
+
+import (
+	"encoding/json"
+	"io"
+	"strings"
+
+	"github.com/FriedJannik/aas-go-sdk/types"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+)
+
+func isLevelValid(level string) bool {
+	return level == "core" || level == "" || level == "deep"
+}
+
+const (
+	extentWithBlobValue    = "withBlobValue"
+	extentWithoutBlobValue = "withoutBlobValue"
+)
+
+func validateLevel(level string) error {
+	if isLevelValid(level) {
+		return nil
+	}
+	return common.NewErrBadRequest("SMREPO-VALIDLEVEL-BADVALUE invalid level parameter")
+}
+
+func normalizeExtent(extent string) (string, error) {
+	if extent == "" || extent == extentWithoutBlobValue {
+		return extentWithoutBlobValue, nil
+	}
+	if extent == extentWithBlobValue {
+		return extentWithBlobValue, nil
+	}
+	return "", common.NewErrBadRequest("SMREPO-NORMEXT-BADVALUE invalid extent parameter")
+}
+
+func stripBlobValuesFromHistoricalSubmodel(submodel types.ISubmodel) {
+	if submodel == nil {
+		return
+	}
+	stripBlobValuesFromElements(submodel.SubmodelElements())
+}
+
+func stripBlobValuesFromElements(elements []types.ISubmodelElement) {
+	for _, element := range elements {
+		stripBlobValuesFromElement(element)
+	}
+}
+
+func stripBlobValuesFromElement(element types.ISubmodelElement) {
+	if element == nil {
+		return
+	}
+
+	if blob, ok := element.(types.IBlob); ok {
+		blob.SetValue(nil)
+		return
+	}
+
+	switch typedElement := element.(type) {
+	case types.ISubmodelElementList:
+		stripBlobValuesFromElements(typedElement.Value())
+	case types.ISubmodelElementCollection:
+		stripBlobValuesFromElements(typedElement.Value())
+	case types.IEntity:
+		stripBlobValuesFromElements(typedElement.Statements())
+	case types.IAnnotatedRelationshipElement:
+		stripBlobValuesFromAnnotations(typedElement.Annotations())
+	case types.IOperation:
+		stripBlobValuesFromOperationVariables(typedElement.InputVariables())
+		stripBlobValuesFromOperationVariables(typedElement.OutputVariables())
+		stripBlobValuesFromOperationVariables(typedElement.InoutputVariables())
+	}
+}
+
+func stripBlobValuesFromAnnotations(annotations []types.IDataElement) {
+	for _, annotation := range annotations {
+		stripBlobValuesFromElement(annotation)
+	}
+}
+
+func stripBlobValuesFromOperationVariables(variables []types.IOperationVariable) {
+	for _, variable := range variables {
+		if variable == nil {
+			continue
+		}
+		stripBlobValuesFromElement(variable.Value())
+	}
+}
+
+func pruneSubmodelToCore(submodel types.ISubmodel) {
+	if submodel == nil {
+		return
+	}
+	pruneElementsToCore(submodel.SubmodelElements())
+}
+
+func pruneElementsToCore(elements []types.ISubmodelElement) {
+	for _, element := range elements {
+		pruneElementToCore(element)
+	}
+}
+
+func pruneElementToCore(element types.ISubmodelElement) {
+	if element == nil {
+		return
+	}
+
+	switch typedElement := element.(type) {
+	case types.ISubmodelElementList:
+		typedElement.SetValue(nil)
+	case types.ISubmodelElementCollection:
+		typedElement.SetValue(nil)
+	case types.IEntity:
+		typedElement.SetStatements(nil)
+	case types.IAnnotatedRelationshipElement:
+		typedElement.SetAnnotations(nil)
+	case types.IOperation:
+		typedElement.SetInputVariables(nil)
+		typedElement.SetOutputVariables(nil)
+		typedElement.SetInoutputVariables(nil)
+	}
+}
+
+type allSubmodelsPathCursorState struct {
+	SubmodelCursor string `json:"submodelCursor,omitempty"`
+	PathCursor     string `json:"pathCursor,omitempty"`
+}
+
+func decodeAllSubmodelsPathCursorState(cursor string) (allSubmodelsPathCursorState, error) {
+	if cursor == "" {
+		return allSubmodelsPathCursorState{}, nil
+	}
+	var state allSubmodelsPathCursorState
+	decoder := json.NewDecoder(strings.NewReader(cursor))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&state); err != nil {
+		return state, common.NewErrBadRequest("SMREPO-DECPATHCURSOR-JSON " + err.Error())
+	}
+	if state.SubmodelCursor == "" {
+		return state, common.NewErrBadRequest("SMREPO-DECPATHCURSOR-EMPTY submodel cursor is required")
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return state, common.NewErrBadRequest("SMREPO-DECPATHCURSOR-TRAILING unexpected data")
+	}
+	return state, nil
+}
+
+func encodeAllSubmodelsPathCursorState(state allSubmodelsPathCursorState) (string, error) {
+	if state.SubmodelCursor == "" && state.PathCursor == "" {
+		return "", nil
+	}
+
+	payload, marshalErr := json.Marshal(state)
+	if marshalErr != nil {
+		return "", common.NewInternalServerError("SMREPO-ENCPATHCURSOR-MARSHAL " + marshalErr.Error())
+	}
+	return string(payload), nil
+}

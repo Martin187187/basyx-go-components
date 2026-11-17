@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -34,69 +34,88 @@ package persistencepostgresql
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
-	"os"
-	"strings"
+	"log/slog"
 	"time"
 
+	"github.com/FriedJannik/aas-go-sdk/types"
+	"github.com/doug-martin/goqu/v9"
 	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/conditional"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/descriptors"
 	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model/grammar"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/pagination"
+	auth "github.com/eclipse-basyx/basyx-go-components/internal/common/security"
 )
 
 // PostgreSQLDiscoveryDatabase provides PostgreSQL-based persistence for the Discovery Service.
 //
-// It manages AAS identifiers and their associated asset links in a PostgreSQL database,
-// using connection pooling for efficient database access. The database schema is automatically
-// initialized on startup from the discoveryschema.sql file.
+// It manages AAS identifiers and their associated specific asset IDs in a PostgreSQL database,
+// using connection pooling for efficient database access. The database schema can be initialized
+// on startup via the provided schema path.
 type PostgreSQLDiscoveryDatabase struct {
-	pool *pgxpool.Pool
+	writerDB *sql.DB
+	readerDB *sql.DB
 }
 
 // NewPostgreSQLDiscoveryBackend creates and initializes a new PostgreSQL discovery database backend.
 //
 // This function establishes a connection pool to the PostgreSQL database using the provided DSN
-// (Data Source Name), configures connection pool settings, and initializes the database schema
-// by executing the discoveryschema.sql file from the resources/sql directory.
+// (Data Source Name), configures connection pool settings, and optionally initializes the database
+// schema using the provided schema file path.
 //
 // Parameters:
 //   - dsn: PostgreSQL connection string (e.g., "postgres://user:pass@localhost:5432/dbname")
-//   - maxConns: Maximum number of connections in the pool
+//   - maxOpenConns: Maximum number of open connections in the pool
+//   - maxIdleConns: Maximum number of idle connections in the pool
+//   - connMaxLifetimeMinutes: Maximum connection lifetime in minutes
+//   - databaseSchema: SQL schema file path for initialization (empty to skip)
 //
 // Returns:
 //   - *PostgreSQLDiscoveryDatabase: Initialized database instance
 //   - error: Configuration, connection, or schema initialization error
-//
-// The connection pool is configured with:
-//   - MaxConns: Set to the provided maxConns parameter
-//   - MaxConnLifetime: 5 minutes to ensure connection freshness
-//
-// The function reads and executes discoveryschema.sql from the current working directory's
-// resources/sql subdirectory to set up the required database tables.
-func NewPostgreSQLDiscoveryBackend(dsn string, maxConns int) (*PostgreSQLDiscoveryDatabase, error) {
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		return nil, err
-	}
-	cfg.MaxConns = int32(maxConns)
-	cfg.MaxConnLifetime = 5 * time.Minute
-
-	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+func NewPostgreSQLDiscoveryBackend(
+	dsn string,
+	maxOpenConns int32,
+	maxIdleConns int,
+	connMaxLifetimeMinutes int,
+) (*PostgreSQLDiscoveryDatabase, error) {
+	db, err := common.NewDatabaseConnectionWithConfig(dsn, common.PostgresConfig{
+		MaxOpenConnections:     int(maxOpenConns),
+		MaxIdleConnections:     maxIdleConns,
+		ConnMaxLifetimeMinutes: connMaxLifetimeMinutes,
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	dir, _ := os.Getwd()
-	schema, err := os.ReadFile(dir + "/resources/sql/discoveryschema.sql")
-	if err != nil {
-		return nil, err
-	}
-	if _, err := pool.Exec(context.Background(), string(schema)); err != nil {
-		return nil, err
-	}
+	return NewPostgreSQLDiscoveryBackendFromDB(db)
+}
 
-	return &PostgreSQLDiscoveryDatabase{pool: pool}, nil
+// NewPostgreSQLDiscoveryBackendFromDB creates a new backend instance from an existing DB pool.
+func NewPostgreSQLDiscoveryBackendFromDB(db *sql.DB) (*PostgreSQLDiscoveryDatabase, error) {
+	if db == nil {
+		return nil, common.NewErrBadRequest("DISC-NEWFROMDB-NILDB database handle must not be nil")
+	}
+	return NewPostgreSQLDiscoveryBackendFromPools(db, db)
+}
+
+// NewPostgreSQLDiscoveryBackendFromPools creates a backend with separate
+// writer and reader pools.
+func NewPostgreSQLDiscoveryBackendFromPools(writer *sql.DB, reader *sql.DB) (*PostgreSQLDiscoveryDatabase, error) {
+	if writer == nil {
+		return nil, common.NewErrBadRequest("DISC-NEWFROMPOOLS-NILWRITER writer database handle must not be nil")
+	}
+	if reader == nil {
+		return nil, common.NewErrBadRequest("DISC-NEWFROMPOOLS-NILREADER reader database handle must not be nil")
+	}
+	return &PostgreSQLDiscoveryDatabase{writerDB: writer, readerDB: reader}, nil
+}
+
+func (p *PostgreSQLDiscoveryDatabase) readDB(ctx context.Context) *sql.DB {
+	return common.PostgresReadPool(ctx, p.writerDB, p.readerDB)
 }
 
 // GetAllAssetLinks retrieves all asset links associated with a specific AAS identifier.
@@ -114,54 +133,23 @@ func NewPostgreSQLDiscoveryBackend(dsn string, maxConns int) (*PostgreSQLDiscove
 // The method operates within a transaction to ensure consistency, though it performs
 // read-only operations. If the AAS identifier is not found in the database, an ErrNotFound
 // error is returned.
-func (p *PostgreSQLDiscoveryDatabase) GetAllAssetLinks(aasID string) ([]model.SpecificAssetID, error) {
-	ctx := context.Background()
-	tx, err := p.pool.Begin(ctx)
+func (p *PostgreSQLDiscoveryDatabase) GetAllAssetLinks(ctx context.Context, aasID string) ([]types.ISpecificAssetID, error) {
+	var links []types.ISpecificAssetID
+	err := common.ExecuteInReadTransaction(ctx, p.readDB(ctx), "DISC-GETASSETLINKS-STARTTX", "DISC-GETASSETLINKS-COMMIT", func(tx *sql.Tx) error {
+		var txErr error
+		links, txErr = descriptors.ReadSpecificAssetIDsByAASIdentifier(ctx, tx, aasID)
+		return txErr
+	})
 	if err != nil {
-		fmt.Println(err)
-		return nil, common.NewInternalServerError("Failed to start postgres transaction. See console for information.")
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	var referenceID int64
-	if err := tx.QueryRow(ctx, `SELECT id FROM aas_identifier WHERE aasID = $1`, aasID).Scan(&referenceID); err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, common.NewErrNotFound("AAS identifier '" + aasID + "'")
+		switch {
+		case common.IsErrNotFound(err):
+			return nil, err
+		default:
+			slog.ErrorContext(ctx, "asset link query failed", "error.code", "DISC-GETASSETLINKS-QUERY", "error", err)
+			return nil, common.NewInternalServerError("DISC-GETASSETLINKS-QUERY failed to query specific asset IDs")
 		}
-		fmt.Println(err)
-		return nil, common.NewInternalServerError("Failed to fetch aas identifier. See console for information.")
 	}
-
-	rows, err := tx.Query(ctx, `SELECT name, value FROM asset_link WHERE aasRef = $1 ORDER BY id`, referenceID)
-	if err != nil {
-		fmt.Println(err)
-		return nil, common.NewInternalServerError("Failed to query asset links. See console for information.")
-	}
-	defer rows.Close()
-
-	var result []model.SpecificAssetID
-	for rows.Next() {
-		var name, value string
-		if err := rows.Scan(&name, &value); err != nil {
-			fmt.Println(err)
-			return nil, common.NewInternalServerError("Failed to scan asset link. See console for information.")
-		}
-		result = append(result, model.SpecificAssetID{
-			Name:  name,
-			Value: value,
-		})
-	}
-	if rows.Err() != nil {
-		fmt.Println(rows.Err())
-		return nil, common.NewInternalServerError("Failed to iterate asset links. See console for information.")
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		fmt.Println(err)
-		return nil, common.NewInternalServerError("Failed to commit postgres transaction. See console for information.")
-	}
-
-	return result, nil
+	return links, nil
 }
 
 // DeleteAllAssetLinks deletes an AAS identifier and all its associated asset links.
@@ -177,18 +165,34 @@ func (p *PostgreSQLDiscoveryDatabase) GetAllAssetLinks(aasID string) ([]model.Sp
 //
 // The deletion is performed atomically. If the AAS identifier is not found (no rows affected),
 // an ErrNotFound error is returned.
-func (p *PostgreSQLDiscoveryDatabase) DeleteAllAssetLinks(aasID string) error {
-	ctx := context.Background()
-
-	tag, err := p.pool.Exec(ctx, `DELETE FROM aas_identifier WHERE aasID = $1`, aasID)
+func (p *PostgreSQLDiscoveryDatabase) DeleteAllAssetLinks(ctx context.Context, aasID string) error {
+	err := descriptors.WithTx(ctx, p.writerDB, func(tx *sql.Tx) error {
+		if reBACErr := auth.RecordReBACResourceDeleted(ctx, tx, auth.SemanticResourceBD, aasID); reBACErr != nil {
+			return reBACErr
+		}
+		deleted, deleteErr := descriptors.DeleteDiscoveryEntryTx(ctx, tx, aasID)
+		if deleteErr != nil {
+			return deleteErr
+		}
+		if !deleted {
+			return common.NewErrNotFound(fmt.Sprintf("AAS identifier %s not found. See console for information.", aasID))
+		}
+		return descriptors.TouchDiscoveryEntryTx(ctx, tx, aasID, conditional.OpDelete)
+	})
 	if err != nil {
-		fmt.Println(err)
-		return common.NewInternalServerError("Failed to delete AAS identifier. See console for information.")
-	}
-	if tag.RowsAffected() == 0 {
-		return common.NewErrNotFound(fmt.Sprintf("AAS identifier %s not found. See console for information.", aasID))
+		return discoveryWriteError(ctx, err, "DISCOVERY-DELETE-EXECQUERY", "Failed to delete AAS identifier. See console for information.")
 	}
 	return nil
+}
+
+// discoveryWriteError keeps errors that determine the response status and
+// hides all other errors behind a generic message.
+func discoveryWriteError(ctx context.Context, err error, code string, message string) error {
+	if common.IsErrNotFound(err) || conditional.IsPreconditionError(err) {
+		return err
+	}
+	slog.ErrorContext(ctx, "discovery write failed", "error.code", code, "error", err)
+	return common.NewInternalServerError(message)
 }
 
 // CreateAllAssetLinks creates or updates an AAS identifier with its associated asset links.
@@ -210,47 +214,17 @@ func (p *PostgreSQLDiscoveryDatabase) DeleteAllAssetLinks(aasID string) error {
 //  3. Bulk insert the new asset links using PostgreSQL's COPY FROM feature for efficiency
 //
 // The use of COPY FROM makes this method highly efficient even for large numbers of asset links.
-func (p *PostgreSQLDiscoveryDatabase) CreateAllAssetLinks(aasID string, specificAssetIDs []model.SpecificAssetID) error {
-	ctx := context.Background()
-	tx, err := p.pool.Begin(ctx)
-	if err != nil {
-		fmt.Println(err)
-		return common.NewInternalServerError("Failed to start postgres transaction. See console for information.")
+func (p *PostgreSQLDiscoveryDatabase) CreateAllAssetLinks(ctx context.Context, aasID string, specificAssetIDs []types.ISpecificAssetID) error {
+	if err := descriptors.ReplaceSpecificAssetIDsByAASIdentifier(ctx, p.writerDB, aasID, specificAssetIDs); err != nil {
+		return discoveryWriteError(ctx, err, "DISCOVERY-CREATE-EXECQUERY", "Failed to store specific asset IDs. See console for information.")
 	}
-	defer func() {
-		_ = tx.Rollback(ctx)
-	}()
+	return nil
+}
 
-	var referenceID int64
-	err = tx.QueryRow(ctx, "INSERT INTO aas_identifier (aasID) VALUES ($1) ON CONFLICT (aasID) DO UPDATE SET aasID = EXCLUDED.aasID RETURNING id", aasID).Scan(&referenceID)
-	if err != nil {
-		fmt.Println(err)
-		return common.NewInternalServerError("Failed to insert aas identifier. See console for information.")
-	}
-
-	if _, err := tx.Exec(ctx, `DELETE FROM asset_link WHERE aasRef = $1`, referenceID); err != nil {
-		return common.NewInternalServerError("Failed to remove old asset links.")
-	}
-
-	rows := make([][]any, len(specificAssetIDs))
-	for i, v := range specificAssetIDs {
-		rows[i] = []any{v.Name, v.Value, referenceID}
-	}
-
-	_, err = tx.CopyFrom(
-		ctx,
-		pgx.Identifier{"asset_link"},
-		[]string{"name", "value", "aasref"},
-		pgx.CopyFromRows(rows),
-	)
-	if err != nil {
-		fmt.Println(err)
-		return common.NewInternalServerError("Failed to insert asset link. See console for information.")
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		fmt.Println(err)
-		return common.NewInternalServerError("Failed to commit postgres transaction. See console for information.")
+// AddAllAssetLinks appends missing asset links for an existing aas identifier.
+func (p *PostgreSQLDiscoveryDatabase) AddAllAssetLinks(ctx context.Context, aasID string, specificAssetIDs []types.ISpecificAssetID) error {
+	if err := descriptors.AddSpecificAssetIDsByAASIdentifier(ctx, p.writerDB, aasID, specificAssetIDs); err != nil {
+		return discoveryWriteError(ctx, err, "DISCOVERY-ADD-EXECQUERY", "Failed to store specific asset IDs. See console for information.")
 	}
 	return nil
 }
@@ -282,82 +256,119 @@ func (p *PostgreSQLDiscoveryDatabase) CreateAllAssetLinks(aasID string, specific
 // Search Logic:
 //   - Empty links: Returns all AAS IDs (paginated)
 //   - With links: Returns AAS IDs that have ALL specified asset links (exact name-value matches)
-//     Uses a GROUP BY with HAVING COUNT to ensure all links are present
-//
-// The query uses a Common Table Expression (CTE) to efficiently match asset links when provided.
+//     Uses EXISTS subqueries to enforce the AND semantics
 func (p *PostgreSQLDiscoveryDatabase) SearchAASIDsByAssetLinks(
 	ctx context.Context,
 	links []model.AssetLink,
 	limit int32,
 	cursor string,
 ) ([]string, string, error) {
-
 	if limit <= 0 {
-		limit = 100
+		limit = common.DefaultPageLimit(ctx)
 	}
 
 	peekLimit := int(limit) + 1
+	if peekLimit < 0 {
+		return nil, "", common.NewErrBadRequest("Limit has to be higher than 0")
+	}
+	d := goqu.Dialect("postgres")
+	ai := goqu.T("aas_identifier")
+	ad := goqu.T(common.TblAASDescriptor)
 
-	args := []any{}
-	argPos := 1
-	whereCursor := fmt.Sprintf("( $%d = '' OR ai.aasID >= $%d )", argPos, argPos)
-	args = append(args, cursor)
-	argPos++
-
-	var sqlStr string
-	if len(links) == 0 {
-		sqlStr = fmt.Sprintf(`
-			SELECT ai.aasId
-			FROM aas_identifier ai
-			WHERE %s
-			ORDER BY ai.aasID ASC
-			LIMIT $%d
-		`, whereCursor, argPos)
-		args = append(args, peekLimit)
-	} else {
-		var valuesSQL strings.Builder
-		for i, l := range links {
-			if i > 0 {
-				valuesSQL.WriteString(", ")
-			}
-			valuesSQL.WriteString(fmt.Sprintf("($%d, $%d)", argPos, argPos+1))
-			args = append(args, l.Name, l.Value)
-			argPos += 2
-		}
-
-		sqlStr = fmt.Sprintf(`
-			WITH v(name, value) AS (VALUES %s)
-			SELECT ai.aasId
-			FROM aas_identifier ai
-			JOIN asset_link al ON al.aasRef = ai.id
-			JOIN v ON v.name = al.name AND v.value = al.value
-			WHERE %s
-			GROUP BY ai.aasId
-			HAVING COUNT(DISTINCT (al.name, al.value)) = (SELECT COUNT(*) FROM v)
-			ORDER BY ai.aasID ASC
-			LIMIT $%d
-		`, valuesSQL.String(), whereCursor, argPos)
-		args = append(args, peekLimit)
+	ds := d.From(ai).
+		LeftJoin(
+			ad,
+			goqu.On(ad.Col(common.ColAASID).Eq(ai.Col("aasid"))),
+		).
+		Select(ai.Col("aasid"))
+	if cursor != "" {
+		cursorExists := d.
+			From(goqu.T("aas_identifier").As("cursor_ai")).
+			Select(goqu.L("1")).
+			Where(goqu.I("cursor_ai.aasid").Eq(cursor))
+		ds = ds.
+			Where(goqu.Exists(cursorExists)).
+			Where(ai.Col("aasid").Gte(cursor))
 	}
 
-	rows, err := p.pool.Query(ctx, sqlStr, args...)
+	uniqueLinks := uniqueAssetLinks(links)
+	if len(uniqueLinks) > 0 {
+		sai := goqu.T(common.TblSpecificAssetID).As("sai")
+		for _, link := range uniqueLinks {
+			if link.Name == common.GlobalAssetIDAssetLinkName {
+				// DTR defines globalAssetId as a public discovery selector. Matching it may reveal
+				// the associated AAS ID independently of descriptor response-field projection.
+				ds = ds.Where(ai.Col("aasid").In(globalAssetIDLookupDataset(d, link.Value)))
+				continue
+			}
+
+			existsSub := d.From(sai).
+				Select(goqu.L("1")).
+				Where(goqu.And(
+					goqu.I("sai.aasref").Eq(ai.Col(common.ColID)),
+					goqu.I("sai.name").Eq(link.Name),
+					goqu.I("sai.value").Eq(link.Value),
+				))
+			ds = ds.Where(goqu.Exists(existsSub))
+		}
+	}
+
+	ds = ds.
+		Order(ai.Col("aasid").Asc()).
+		Limit(uint(peekLimit))
+
+	collector, err := grammar.NewResolvedFieldPathCollectorForRoot(grammar.CollectorRootBD)
 	if err != nil {
-		fmt.Println("SearchAASIDsByAssetLinks: query error:", err)
+		slog.ErrorContext(ctx, "query field collector creation failed", "error.code", "DISCOVERY-SEARCH-CREATECOLLECTOR", "error", err)
+		return nil, "", common.NewInternalServerError("Failed to build query filters. See server logs for details.")
+	}
+
+	ds, err = auth.AddFormulaQueryFromContext(ctx, ds, collector)
+	if err != nil {
+		slog.ErrorContext(ctx, "authorization filter creation failed", "error.code", "DISCOVERY-SEARCH-ADDFILTER", "error", err)
+		return nil, "", common.NewInternalServerError("Failed to build query filters. See server logs for details.")
+	}
+
+	sqlStr, args, err := ds.Prepared(true).ToSQL()
+	debugEnabled := common.DebugEnabled(ctx)
+	if debugEnabled {
+		slog.DebugContext(ctx, "discovery database query prepared")
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "database query construction failed", "error.code", "DISCOVERY-SEARCH-BUILDQUERY", "error", err)
 		return nil, "", common.NewInternalServerError("Failed to query AAS IDs. See server logs for details.")
 	}
-	defer rows.Close()
 
-	buf := make([]string, 0, peekLimit)
+	var rows *sql.Rows
+	readerDB := p.readDB(ctx)
+	if debugEnabled {
+		start := time.Now()
+		rows, err = readerDB.QueryContext(ctx, sqlStr, args...)
+		slog.DebugContext(ctx, "discovery database query completed", "duration", time.Since(start))
+	} else {
+		rows, err = readerDB.QueryContext(ctx, sqlStr, args...)
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "database query failed", "error.code", "DISCOVERY-SEARCH-EXECQUERY", "error", err)
+		return nil, "", common.NewInternalServerError("Failed to query AAS IDs. See server logs for details.")
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			slog.ErrorContext(ctx, "database row cleanup failed", "error.code", "DISCOVERY-SEARCH-CLOSEROWS", "error", closeErr)
+		}
+	}()
+
+	buf := make([]string, 0, pagination.BufferCapacity(peekLimit))
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			fmt.Println("SearchAASIDsByAssetLinks: scan error:", err)
+			slog.ErrorContext(ctx, "database row scan failed", "error.code", "DISCOVERY-SEARCH-SCANROW", "error", err)
 			return nil, "", common.NewInternalServerError("Failed to scan AAS ID. See server logs for details.")
 		}
 		buf = append(buf, id)
 	}
 	if rows.Err() != nil {
-		fmt.Println("SearchAASIDsByAssetLinks: rows error:", rows.Err())
+		slog.ErrorContext(ctx, "database row iteration failed", "error.code", "DISCOVERY-SEARCH-ITERATEROWS", "error", rows.Err())
 		return nil, "", common.NewInternalServerError("Failed to iterate AAS IDs. See server logs for details.")
 	}
 
@@ -368,4 +379,46 @@ func (p *PostgreSQLDiscoveryDatabase) SearchAASIDsByAssetLinks(
 	}
 
 	return buf, "", nil
+}
+
+func globalAssetIDLookupDataset(d goqu.DialectWrapper, value string) *goqu.SelectDataset {
+	ad := goqu.T(common.TblAASDescriptor).As("ad_global")
+	descriptorAAS := goqu.T("aas_identifier").As("ai_global_descriptor")
+	sai := goqu.T(common.TblSpecificAssetID).As("sai_global")
+	discoveryAAS := goqu.T("aas_identifier").As("ai_global_discovery")
+
+	descriptorMatches := d.From(ad).
+		Join(
+			descriptorAAS,
+			goqu.On(descriptorAAS.Col("aasid").Eq(ad.Col(common.ColAASID))),
+		).
+		Select(descriptorAAS.Col("aasid")).
+		Where(ad.Col(common.ColGlobalAssetID).Eq(value))
+
+	discoveryMatches := d.From(sai).
+		Join(
+			discoveryAAS,
+			goqu.On(discoveryAAS.Col(common.ColID).Eq(sai.Col(common.ColAASRef))),
+		).
+		Select(discoveryAAS.Col("aasid")).
+		Where(
+			sai.Col(common.ColName).Eq(common.GlobalAssetIDAssetLinkName),
+			sai.Col(common.ColValue).Eq(value),
+		)
+
+	return descriptorMatches.Union(discoveryMatches)
+}
+
+func uniqueAssetLinks(links []model.AssetLink) []model.AssetLink {
+	seen := make(map[string]struct{}, len(links))
+	out := make([]model.AssetLink, 0, len(links))
+	for _, link := range links {
+		key := link.Name + "\x1f" + link.Value
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, link)
+	}
+	return out
 }

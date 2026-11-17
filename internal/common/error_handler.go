@@ -1,57 +1,83 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
 // Package common provides error handling utilities for BaSyx Go components.
 // It includes structured error types, HTTP status code error constructors,
 // error classification functions, and standardized error response generation
 // for consistent API error handling across all BaSyx services.
+//
+//nolint:all
 package common
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
 )
 
-// ErrorHandler represents a structured error response with metadata.
-// It provides standardized error information including message type,
-// error text, error code, correlation ID for tracking, and timestamp.
-//
-// The struct is JSON-serializable and follows BaSyx error response format
-// for consistent API error reporting across all services.
-type ErrorHandler struct {
-	MessageType   string `json:"messageType"`             // Type of the message (e.g., "Error", "Warning")
-	Text          string `json:"text"`                    // Human-readable error description
-	Code          string `json:"code,omitempty"`          // HTTP status code as string
-	CorrelationID string `json:"correlationId,omitempty"` // Unique identifier for error tracking
-	Timestamp     string `json:"timestamp,omitempty"`     // RFC3339 formatted timestamp
+type sqlStateError interface {
+	SQLState() string
 }
 
-// NewErrorHandler creates a new ErrorHandler instance with the provided parameters.
+type payloadTooLargeError struct {
+	message string
+}
+
+func (err *payloadTooLargeError) Error() string {
+	return "413 Payload Too Large: " + err.message
+}
+
+// IsPostgresErrorCode reports whether an error has a PostgreSQL SQLSTATE.
+//
+// The function unwraps err and checks any error that exposes SQLState().
 //
 // Parameters:
-//   - messageType: The type of message (typically "Error" for error responses)
-//   - text: The error that occurred, will be converted to string using Error() method
-//   - code: HTTP status code as string (e.g., "404", "500")
-//   - correlationID: Unique identifier for tracking this error across systems
-//   - timestamp: RFC3339 formatted timestamp when the error occurred
+//   - err: Error to inspect.
+//   - code: PostgreSQL SQLSTATE code to match.
 //
 // Returns:
-//   - *ErrorHandler: A pointer to the newly created ErrorHandler instance
-//
-// Example:
-//
-//	err := errors.New("resource not found")
-//	handler := NewErrorHandler("Error", err, "404", "req-123", "2023-11-03T10:00:00Z")
-func NewErrorHandler(messageType string, text error, code string, correlationID string, timestamp string) *ErrorHandler {
-	return &ErrorHandler{
-		MessageType:   messageType,
-		Text:          text.Error(),
-		Code:          code,
-		CorrelationID: correlationID,
-		Timestamp:     timestamp,
+//   - bool: True when err or a wrapped error exposes the requested code.
+func IsPostgresErrorCode(err error, code string) bool {
+	if err == nil {
+		return false
 	}
+	var stateErr sqlStateError
+	return errors.As(err, &stateErr) && stateErr.SQLState() == code
+}
+
+// IsPostgresUniqueViolation reports PostgreSQL unique constraint violations.
+//
+// Parameters:
+//   - err: Error to inspect.
+//
+// Returns:
+//   - bool: True when err or a wrapped error has SQLSTATE 23505.
+func IsPostgresUniqueViolation(err error) bool {
+	return IsPostgresErrorCode(err, "23505")
 }
 
 // NewErrNotFound creates a standardized "404 Not Found" error.
@@ -86,6 +112,22 @@ func NewErrBadRequest(message string) error {
 	return errors.New("400 Bad Request: " + message)
 }
 
+// NewErrPayloadTooLarge creates a standardized "413 Payload Too Large" error.
+//
+// Parameters:
+//   - message: Description of which configured payload limit was exceeded
+//
+// Returns:
+//   - error: An error with message format "413 Payload Too Large: <message>"
+//
+// Example:
+//
+//	err := NewErrPayloadTooLarge("upload exceeds configured maximum")
+//	// Returns error: "413 Payload Too Large: upload exceeds configured maximum"
+func NewErrPayloadTooLarge(message string) error {
+	return &payloadTooLargeError{message: message}
+}
+
 // NewInternalServerError creates a standardized "500 Internal Server Error" error.
 //
 // Parameters:
@@ -100,6 +142,38 @@ func NewErrBadRequest(message string) error {
 //	// Returns error: "500 Internal Server Error: database connection failed"
 func NewInternalServerError(message string) error {
 	return errors.New("500 Internal Server Error: " + message)
+}
+
+// NewErrServiceUnavailable creates a standardized "503 Service Unavailable" error.
+//
+// Parameters:
+//   - message: Description of the temporarily unavailable dependency or service.
+//
+// Returns:
+//   - error: An error with message format "503 Service Unavailable: <message>"
+//
+// Example:
+//
+//	err := NewErrServiceUnavailable("object store unavailable")
+//	// Returns error: "503 Service Unavailable: object store unavailable"
+func NewErrServiceUnavailable(message string) error {
+	return errors.New("503 Service Unavailable: " + message)
+}
+
+// NewErrMethodNotAllowed creates a standardized "405 Method Not Allowed" error.
+//
+// Parameters:
+//   - message: Description of the method that is not allowed
+//
+// Returns:
+//   - error: An error with message format "405 Method Not Allowed: <message>"
+//
+// Example:
+//
+//	err := NewErrMethodNotAllowed("POST method not allowed on this endpoint")
+//	// Returns error: "405 Method Not Allowed: POST method not allowed on this endpoint"
+func NewErrMethodNotAllowed(message string) error {
+	return errors.New("405 Method Not Allowed: " + message)
 }
 
 // NewErrConflict creates a standardized "409 Conflict" error.
@@ -118,6 +192,17 @@ func NewErrConflict(message string) error {
 	return errors.New("409 Conflict: " + message)
 }
 
+// NewErrDenied creates a standardized "403 Denied" error.
+//
+// Parameters:
+//   - message: Description of the denied action that occurred
+//
+// Returns:
+//   - error: An error with message format "403 Denied: <message>"
+func NewErrDenied(message string) error {
+	return errors.New("403 Denied: " + message)
+}
+
 // IsErrNotFound checks if the given error is a "404 Not Found" error.
 //
 // Parameters:
@@ -133,7 +218,7 @@ func NewErrConflict(message string) error {
 //	    // Handle not found case
 //	}
 func IsErrNotFound(err error) bool {
-	return err != nil && strings.HasPrefix(err.Error(), "404 Not Found: ")
+	return hasErrorPrefix(err, "404 Not Found: ")
 }
 
 // IsErrBadRequest checks if the given error is a "400 Bad Request" error.
@@ -151,7 +236,26 @@ func IsErrNotFound(err error) bool {
 //	    // Handle bad request case
 //	}
 func IsErrBadRequest(err error) bool {
-	return err != nil && strings.HasPrefix(err.Error(), "400 Bad Request: ")
+	return hasErrorPrefix(err, "400 Bad Request: ")
+}
+
+// IsErrPayloadTooLarge checks if the given error is a "413 Payload Too Large" error.
+//
+// Parameters:
+//   - err: Error to inspect
+//
+// Returns:
+//   - bool: true if the error is a 413 Payload Too Large error, false otherwise
+//
+// Example:
+//
+//	err := NewErrPayloadTooLarge("request too large")
+//	if IsErrPayloadTooLarge(err) {
+//	    // Handle the exceeded payload limit.
+//	}
+func IsErrPayloadTooLarge(err error) bool {
+	var typedError *payloadTooLargeError
+	return errors.As(err, &typedError) || hasErrorPrefix(err, "413 Payload Too Large: ")
 }
 
 // IsInternalServerError checks if the given error is a "500 Internal Server Error" error.
@@ -169,7 +273,18 @@ func IsErrBadRequest(err error) bool {
 //	    // Handle internal server error case
 //	}
 func IsInternalServerError(err error) bool {
-	return err != nil && strings.HasPrefix(err.Error(), "500 Internal Server Error: ")
+	return hasErrorPrefix(err, "500 Internal Server Error: ")
+}
+
+// IsErrServiceUnavailable checks if the given error is a "503 Service Unavailable" error.
+//
+// Parameters:
+//   - err: The error to check
+//
+// Returns:
+//   - bool: true if the error is a 503 Service Unavailable error, false otherwise
+func IsErrServiceUnavailable(err error) bool {
+	return hasErrorPrefix(err, "503 Service Unavailable: ")
 }
 
 // IsErrConflict checks if the given error is a "409 Conflict" error.
@@ -187,7 +302,38 @@ func IsInternalServerError(err error) bool {
 //	    // Handle conflict case
 //	}
 func IsErrConflict(err error) bool {
-	return err != nil && strings.HasPrefix(err.Error(), "409 Conflict: ")
+	return hasErrorPrefix(err, "409 Conflict: ")
+}
+
+// IsErrDenied checks if the given error is a "403 Denied" error.
+//
+// Parameters:
+//   - err: The error to check
+//
+// Returns:
+//   - bool: true if the error is a 403 Denied error, false otherwise
+func IsErrDenied(err error) bool {
+	return hasErrorPrefix(err, "403 Denied: ")
+}
+
+// IsErrMethodNotAllowed checks if the given error is a "405 Method Not Allowed" error.
+//
+// Parameters:
+//   - err: The error to check
+//
+// Returns:
+//   - bool: true if the error is a 405 Method Not Allowed error, false otherwise
+func IsErrMethodNotAllowed(err error) bool {
+	return hasErrorPrefix(err, "405 Method Not Allowed: ")
+}
+
+func hasErrorPrefix(err error, prefix string) bool {
+	for current := err; current != nil; current = errors.Unwrap(current) {
+		if strings.HasPrefix(current.Error(), prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // NewErrorResponse creates a standardized HTTP error response with structured error information.
@@ -216,14 +362,56 @@ func IsErrConflict(err error) bool {
 //	response := NewErrorResponse(err, 404, "submodel", "GetSubmodel", "invalidID")
 //	// Creates response with correlation ID: "submodel-404-GetSubmodel-NotFound-invalidID"
 func NewErrorResponse(err error, errorCode int, component string, function string, info string) model.ImplResponse {
-	codeStr := strconv.Itoa(errorCode)
-	statusText := strings.ReplaceAll(http.StatusText(errorCode), " ", "")
-	internalCode := fmt.Sprintf("%s-%s-%s-%s-%s", component, codeStr, function, statusText, info)
+	if IsErrServiceUnavailable(err) {
+		errorCode = http.StatusServiceUnavailable
+	}
+	if IsErrPayloadTooLarge(err) {
+		errorCode = http.StatusRequestEntityTooLarge
+	}
+	return model.NewErrorResponse(err, errorCode, component, function, info)
+}
 
-	return model.Response(
-		errorCode,
-		[]ErrorHandler{
-			*NewErrorHandler("Error", err, codeStr, internalCode, string(GetCurrentTimestamp())),
-		},
+// WriteErrorResponse writes a standardized JSON error response.
+//
+// Typed common errors may override status; for example, a payload-limit error
+// is always emitted as HTTP 413.
+//
+// Parameters:
+//   - w: Destination response writer.
+//   - err: Error exposed in the structured response.
+//   - status: Fallback HTTP status code.
+//   - component: Component name used in the correlation code.
+//   - function: Operation name used in the correlation code.
+//   - info: Step name used in the correlation code.
+//
+// Returns:
+//   - error: JSON encoding or response-write error.
+func WriteErrorResponse(w http.ResponseWriter, err error, status int, component, function, info string) error {
+	response := NewErrorResponse(err, status, component, function, info)
+	return model.EncodeJSONResponse(response.Body, &response.Code, w)
+}
+
+// NewAccessDeniedResponse returns a standardized HTTP 403 Forbidden error response.
+//
+// This function is used when a request is not allowed to proceed due to missing
+// or invalid permissions. To avoid leaking internal implementation details,
+// the response is intentionally generic and does not expose information about
+// where or why the access decision was made.
+//
+// All access-denied situations intentionally produce the exact same structure,
+// making it harder for callers to infer internal logic, rule configurations,
+// or authorization paths.
+//
+// Returns:
+//   - model.ImplResponse: A standardized 403 Forbidden response with a fixed
+//     error message and correlation code pattern.
+//
+// Example:
+//
+//	response := NewAccessDeniedResponse()
+//	// Produces a consistent "access denied" error without internal metadata.
+func NewAccessDeniedResponse() model.ImplResponse {
+	return NewErrorResponse(
+		errors.New("access denied"), http.StatusForbidden, "Middleware", "Rules", "Denied",
 	)
 }

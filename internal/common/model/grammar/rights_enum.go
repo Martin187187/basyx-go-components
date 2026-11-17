@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -25,12 +25,15 @@
 
 // Package grammar defines the data structures for representing rights enumerations in the grammar model.
 // Author: Aaron Zielstorff ( Fraunhofer IESE ), Jannik Fried ( Fraunhofer IESE )
+//
+//nolint:all
 package grammar
 
 import (
-	"encoding/json"
 	"fmt"
 	"reflect"
+
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
 )
 
 // RightsEnum defines the enumeration for different rights in the grammar model.
@@ -51,9 +54,6 @@ const RightsEnumEXECUTE RightsEnum = "EXECUTE"
 // RightsEnumREAD right to read elements
 const RightsEnumREAD RightsEnum = "READ"
 
-// RightsEnumTREE right to view the tree structure of elements
-const RightsEnumTREE RightsEnum = "TREE"
-
 // RightsEnumUPDATE right to update elements
 const RightsEnumUPDATE RightsEnum = "UPDATE"
 
@@ -68,13 +68,12 @@ var enumValuesRightsEnum = []interface{}{
 	"EXECUTE",
 	"VIEW",
 	"ALL",
-	"TREE",
 }
 
 // UnmarshalJSON implements json.Unmarshaler.
 func (j *RightsEnum) UnmarshalJSON(value []byte) error {
 	var v string
-	if err := json.Unmarshal(value, &v); err != nil {
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &v); err != nil {
 		return err
 	}
 	var ok bool

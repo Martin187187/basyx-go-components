@@ -1,0 +1,210 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
+package binarycontent
+
+import (
+	"context"
+	"io"
+	"strings"
+	"testing"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/stretchr/testify/require"
+)
+
+func TestSafeFileName(t *testing.T) {
+	tests := []struct {
+		name      string
+		fileName  string
+		expected  string
+		wantError bool
+	}{
+		{name: "ordinary", fileName: "manual.pdf", expected: "manual.pdf"},
+		{name: "unicode", fileName: "Prüfbericht 1.pdf", expected: "Prüfbericht 1.pdf"},
+		{name: "trims whitespace", fileName: " report.txt ", expected: "report.txt"},
+		{name: "empty", fileName: "  ", wantError: true},
+		{name: "parent", fileName: "..", wantError: true},
+		{name: "slash", fileName: "folder/report.txt", wantError: true},
+		{name: "backslash", fileName: `folder\report.txt`, wantError: true},
+		{name: "encoded slash", fileName: "folder%2freport.txt", wantError: true},
+		{name: "control", fileName: "report\n.txt", wantError: true},
+		{name: "maximum bytes", fileName: strings.Repeat("a", maxSafeFileNameBytes), expected: strings.Repeat("a", maxSafeFileNameBytes)},
+		{name: "maximum multibyte bytes", fileName: strings.Repeat("ü", 127) + "a", expected: strings.Repeat("ü", 127) + "a"},
+		{name: "too many bytes", fileName: strings.Repeat("a", maxSafeFileNameBytes+1), wantError: true},
+		{name: "unicode byte limit", fileName: strings.Repeat("ü", 128), wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			actual, err := SafeFileName(test.fileName)
+			if test.wantError {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, test.expected, actual)
+		})
+	}
+}
+
+func TestLargeObjectReaderSeekResetsBufferedState(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT lo_lseek64`).
+		WillReturnRows(sqlmock.NewRows([]string{"lo_lseek64"}).AddRow(int64(0)))
+	mock.ExpectQuery(`SELECT lo_lseek64\(23, -8, 1\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"lo_lseek64"}).AddRow(int64(24)))
+	mock.ExpectRollback()
+
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	reader := &largeObjectReader{
+		ctx: t.Context(), tx: tx, descriptor: 23, pending: []byte("buffered"), done: true,
+	}
+
+	position, err := reader.Seek(0, io.SeekStart)
+	require.NoError(t, err)
+	require.Zero(t, position)
+	require.Empty(t, reader.pending)
+	require.False(t, reader.done)
+
+	reader.pending = []byte("buffered")
+	position, err = reader.Seek(0, io.SeekCurrent)
+	require.NoError(t, err)
+	require.Equal(t, int64(24), position)
+	require.Empty(t, reader.pending)
+	require.NoError(t, tx.Rollback())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestNewReferenceUsesFreshOpaqueManagedPath(t *testing.T) {
+	content := Content{ID: 1, SHA256: strings.Repeat("a", 64), SizeBytes: 4, OID: 7}
+	first, err := NewReference(5, content, "manual.pdf")
+	require.NoError(t, err)
+	second, err := NewReference(5, content, "manual.pdf")
+	require.NoError(t, err)
+
+	require.NotEqual(t, first.PathToken, second.PathToken)
+	require.Len(t, first.PathToken, 32)
+	require.Equal(t, "/aasx/files/"+first.PathToken+"/manual.pdf", first.ManagedPath())
+}
+
+func TestStoreTxRejectsContentAboveConfiguredLimitBeforeWriting(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT lo_create`).WillReturnRows(sqlmock.NewRows([]string{"lo_create"}).AddRow(17))
+	mock.ExpectQuery(`SELECT lo_open`).WillReturnRows(sqlmock.NewRows([]string{"lo_open"}).AddRow(23))
+	mock.ExpectRollback()
+
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	cfg := &common.Config{}
+	cfg.General.UploadMaxSizeBytes = 3
+	ctx := common.ContextWithConfig(context.Background(), cfg)
+
+	_, _, _, err = writeTransientLargeObjectTx(ctx, tx, strings.NewReader("four"), common.UploadMaxSizeBytesFromContext(ctx))
+	require.ErrorContains(t, err, "BINARYCONTENT-STORE-TOOLARGE")
+	require.True(t, common.IsErrPayloadTooLarge(err))
+	require.NoError(t, tx.Rollback())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestLockContentRowsUsesDeterministicOrder(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT "id" FROM "binary_content" WHERE \("id" IN \(1, 2\)\) ORDER BY "id" ASC FOR UPDATE`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1).AddRow(2))
+	mock.ExpectRollback()
+
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	require.NoError(t, lockContentRowsTx(t.Context(), tx, 2, 1, 2))
+	require.NoError(t, tx.Rollback())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDigestContentMatchesStoredDigest(t *testing.T) {
+	digest, err := DigestContent(strings.NewReader("payload"))
+	require.NoError(t, err)
+	require.Equal(t, ContentDigest{Digest: "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5", Size: 7}, digest)
+}
+
+func TestOrderedContentDigestsSortsAndDeduplicates(t *testing.T) {
+	ordered := orderedContentDigests([]ContentDigest{
+		{Digest: "b", Size: 1}, {Digest: "a", Size: 2}, {Digest: "b", Size: 1}, {Digest: "a", Size: 1},
+	})
+	require.Equal(t, []ContentDigest{{Digest: "a", Size: 1}, {Digest: "a", Size: 2}, {Digest: "b", Size: 1}}, ordered)
+}
+
+func TestLockAffectedContentRowsLocksReferencedAndIncomingContentInIDOrder(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT "id" FROM "binary_content" WHERE \(\("id" IN \(SELECT "reference"\."binary_content_id" FROM "file_binary_reference" AS "reference" `+
+		`INNER JOIN "submodel_element" AS "element" ON \("element"\."id" = "reference"\."file_element_id"\) `+
+		`INNER JOIN "submodel" AS "submodel" ON \("submodel"\."id" = "element"\."submodel_id"\) WHERE \("submodel"\."submodel_identifier" IN \(\$1\)\)\)\) `+
+		`OR \("id" IN \(SELECT "reference"\."binary_content_id" FROM "thumbnail_binary_reference" AS "reference" `+
+		`INNER JOIN "aas" AS "aas" ON \("aas"\."id" = "reference"\."thumbnail_element_id"\) WHERE \("aas"\."aas_id" IN \(\$2\)\)\)\) `+
+		`OR \(\("sha256" = \$3\) AND \("size_bytes" = \$4\)\) OR \(\("sha256" = \$5\) AND \("size_bytes" = \$6\)\)\) ORDER BY "id" ASC FOR UPDATE`).
+		WithArgs("urn:sm", "urn:aas", "a", int64(1), "b", int64(2)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1).AddRow(2))
+	mock.ExpectRollback()
+
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	require.NoError(t, LockAffectedContentRowsTx(t.Context(), tx,
+		ContentOwners{SubmodelIdentifiers: []string{"urn:sm"}, AASIdentifiers: []string{"urn:aas"}},
+		[]ContentDigest{{Digest: "b", Size: 2}, {Digest: "a", Size: 1}, {Digest: "b", Size: 2}},
+	))
+	require.NoError(t, tx.Rollback())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestLockAffectedContentRowsSkipsTheQueryWithoutOwnersOrDigests(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectBegin()
+	mock.ExpectRollback()
+
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	require.NoError(t, LockAffectedContentRowsTx(t.Context(), tx, ContentOwners{}, nil))
+	require.NoError(t, tx.Rollback())
+	require.NoError(t, mock.ExpectationsWereMet())
+}

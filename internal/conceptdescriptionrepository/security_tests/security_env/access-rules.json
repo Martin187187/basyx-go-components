@@ -1,0 +1,96 @@
+{
+  "AllAccessPermissionRules": {
+    "DEFATTRIBUTES": [
+      { "name": "anonym_attr", "attributes": [ { "GLOBAL": "ANONYMOUS" } ] },
+      { "name": "role_attr", "attributes": [ { "CLAIM": "role" } ] },
+      { "name": "member_attr", "attributes": [ { "CLAIM": "role" }, { "CLAIM": "clear" } ] }
+    ],
+    "DEFOBJECTS": [
+      {
+        "name": "description",
+        "objects": [
+          { "ROUTE": "/description" }
+        ]
+      },
+      {
+        "name": "all_cd_routes",
+        "objects": [
+          { "ROUTE": "/query/concept-descriptions" },
+          { "ROUTE": "/concept-descriptions" },
+          { "ROUTE": "/concept-descriptions/*" }
+        ]
+      },
+      {
+        "name": "all_cd_identifiable",
+        "objects": [
+          { "IDENTIFIABLE": "$cd(\"*\")" }
+        ]
+      }
+    ],
+    "DEFACLS": [
+      { "name": "read_only_public", "acl": { "USEATTRIBUTES": "anonym_attr", "RIGHTS": ["READ"], "ACCESS": "ALLOW" } },
+      { "name": "read_role", "acl": { "USEATTRIBUTES": "role_attr", "RIGHTS": ["READ"], "ACCESS": "ALLOW" } },
+      { "name": "write_role", "acl": { "USEATTRIBUTES": "role_attr", "RIGHTS": ["CREATE", "UPDATE", "DELETE"], "ACCESS": "ALLOW" } },
+      { "name": "admin_all", "acl": { "USEATTRIBUTES": "member_attr", "RIGHTS": ["ALL"], "ACCESS": "ALLOW" } }
+    ],
+    "DEFFORMULAS": [
+      {
+        "name": "always_true",
+        "formula": { "$boolean": true }
+      },
+      {
+        "name": "viewer_visible_cd",
+        "formula": {
+          "$and": [
+            { "$eq": [ { "$attribute": { "CLAIM": "role" } }, { "$strVal": "viewer" } ] },
+            { "$not": { "$ge": [ { "$numCast": { "$attribute": { "CLAIM": "clear" } } }, { "$numVal": 1 } ] } },
+            { "$eq": [ { "$field": "$cd#idShort" }, { "$strVal": "ViewerAllowed" } ] }
+          ]
+        }
+      },
+      {
+        "name": "viewer_visible_cd_masked",
+        "formula": {
+          "$and": [
+            { "$eq": [ { "$attribute": { "CLAIM": "role" } }, { "$strVal": "viewer" } ] },
+            { "$ge": [ { "$numCast": { "$attribute": { "CLAIM": "clear" } } }, { "$numVal": 1 } ] },
+            { "$eq": [ { "$field": "$cd#idShort" }, { "$strVal": "ViewerAllowed" } ] }
+          ]
+        }
+      },
+      {
+        "name": "editor_allowed_cd",
+        "formula": {
+          "$and": [
+            { "$eq": [ { "$attribute": { "CLAIM": "role" } }, { "$strVal": "editor" } ] },
+            { "$eq": [ { "$field": "$cd#idShort" }, { "$strVal": "EditorAllowed" } ] }
+          ]
+        }
+      },
+      {
+        "name": "is_admin",
+        "formula": {
+          "$and": [
+            { "$eq": [ { "$attribute": { "CLAIM": "role" } }, { "$strVal": "admin" } ] },
+            { "$ge": [ { "$numCast": { "$attribute": { "CLAIM": "clear" } } }, { "$numVal": 10 } ] }
+          ]
+        }
+      }
+    ],
+    "rules": [
+      { "USEACL": "read_only_public", "USEOBJECTS": ["description"], "USEFORMULA": "always_true" },
+      { "USEACL": "admin_all", "USEOBJECTS": ["all_cd_routes"], "USEFORMULA": "is_admin" },
+      { "USEACL": "read_role", "USEOBJECTS": ["all_cd_identifiable"], "USEFORMULA": "viewer_visible_cd" },
+      {
+        "USEACL": "read_role",
+        "USEOBJECTS": ["all_cd_identifiable"],
+        "USEFORMULA": "viewer_visible_cd_masked",
+        "FILTER": {
+          "FRAGMENT": "$cd#idShort",
+          "CONDITION": { "$boolean": false }
+        }
+      },
+      { "USEACL": "write_role", "USEOBJECTS": ["all_cd_routes"], "USEFORMULA": "editor_allowed_cd" }
+    ]
+  }
+}

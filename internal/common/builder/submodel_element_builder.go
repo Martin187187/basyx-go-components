@@ -1,0 +1,982 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
+package builder
+
+import (
+	"bytes"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
+
+	"github.com/FriedJannik/aas-go-sdk/jsonization"
+	"github.com/FriedJannik/aas-go-sdk/types"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
+	jsoniter "github.com/json-iterator/go"
+)
+
+// SubmodelElementBuilder encapsulates the database ID and the constructed SubmodelElement,
+// providing a way to manage and build submodel elements from database rows.
+type SubmodelElementBuilder struct {
+	DatabaseID      int
+	SubmodelElement types.ISubmodelElement
+}
+
+type submodelElementMetadata struct {
+	semanticID                 types.IReference
+	descriptions               []types.ILangStringTextType
+	displayNames               []types.ILangStringNameType
+	embeddedDataSpecifications []types.IEmbeddedDataSpecification
+	supplementalSemanticIDs    []types.IReference
+	qualifiers                 []types.IQualifier
+	extensions                 []types.IExtension
+}
+
+// BuildSubmodelElement constructs a SubmodelElement from the provided database row.
+func BuildSubmodelElement(smeRow model.SubmodelElementRow) (types.ISubmodelElement, *SubmodelElementBuilder, error) {
+	refBuilderMap := make(map[int64]*ReferenceBuilder)
+	var refMutex sync.RWMutex
+	specificSME, err := getSubmodelElementObjectBasedOnModelType(smeRow, refBuilderMap, &refMutex)
+	if err != nil {
+		slog.Error(
+			"submodel element construction failed",
+			"error.code", "COMMON-BUILDSME-CREATETYPE",
+			"id_short", smeRow.IDShort.String,
+			"model_type", smeRow.ModelType,
+			"error", err,
+		)
+		return nil, nil, err
+	}
+	if smeRow.IDShort.Valid && smeRow.IDShort.String != "" {
+		specificSME.SetIDShort(&smeRow.IDShort.String)
+	}
+	if smeRow.Category.Valid {
+		specificSME.SetCategory(&smeRow.Category.String)
+	}
+
+	metadata, err := parseSubmodelElementMetadata(smeRow, refBuilderMap, &refMutex)
+	if err != nil {
+		return nil, nil, err
+	}
+	applySubmodelElementMetadata(specificSME, metadata)
+
+	for _, refBuilder := range refBuilderMap {
+		refBuilder.BuildNestedStructure()
+	}
+
+	return specificSME, &SubmodelElementBuilder{DatabaseID: int(smeRow.DbID.Int64), SubmodelElement: specificSME}, nil
+}
+
+func parseSubmodelElementMetadata(
+	smeRow model.SubmodelElementRow,
+	refBuilderMap map[int64]*ReferenceBuilder,
+	refMutex *sync.RWMutex,
+) (submodelElementMetadata, error) {
+	metadata := submodelElementMetadata{}
+	var err error
+	metadata.semanticID, err = getSingleReference(smeRow.SemanticID, smeRow.SemanticIDReferred, refBuilderMap, refMutex)
+	if err != nil {
+		return metadata, err
+	}
+	metadata.descriptions, err = parseSubmodelElementDescriptions(smeRow.Descriptions)
+	if err != nil {
+		return metadata, err
+	}
+	metadata.displayNames, err = parseSubmodelElementDisplayNames(smeRow.DisplayNames)
+	if err != nil {
+		return metadata, err
+	}
+	metadata.embeddedDataSpecifications, err = parseSubmodelElementEmbeddedDataSpecifications(smeRow)
+	if err != nil {
+		return metadata, err
+	}
+	metadata.supplementalSemanticIDs, err = parseSubmodelElementSupplementalSemanticIDs(smeRow)
+	if err != nil {
+		return metadata, err
+	}
+	metadata.extensions, err = parseSubmodelElementExtensions(smeRow)
+	if err != nil {
+		return metadata, err
+	}
+	metadata.qualifiers, err = parseSubmodelElementQualifiers(smeRow.Qualifiers)
+	return metadata, err
+}
+
+func applySubmodelElementMetadata(element types.ISubmodelElement, metadata submodelElementMetadata) {
+	if metadata.semanticID != nil {
+		element.SetSemanticID(metadata.semanticID)
+	}
+	if len(metadata.extensions) > 0 {
+		element.SetExtensions(metadata.extensions)
+	}
+	if len(metadata.descriptions) > 0 {
+		element.SetDescription(metadata.descriptions)
+	}
+	if len(metadata.displayNames) > 0 {
+		element.SetDisplayName(metadata.displayNames)
+	}
+	if len(metadata.embeddedDataSpecifications) > 0 {
+		element.SetEmbeddedDataSpecifications(metadata.embeddedDataSpecifications)
+	}
+	if len(metadata.qualifiers) > 0 {
+		element.SetQualifiers(metadata.qualifiers)
+	}
+	if len(metadata.supplementalSemanticIDs) > 0 {
+		element.SetSupplementalSemanticIDs(metadata.supplementalSemanticIDs)
+	}
+}
+
+func parseSubmodelElementDescriptions(payload *json.RawMessage) ([]types.ILangStringTextType, error) {
+	if !jsonArrayHasItems(payload) {
+		return nil, nil
+	}
+	return ParseLangStringTextType(*payload)
+}
+
+func parseSubmodelElementDisplayNames(payload *json.RawMessage) ([]types.ILangStringNameType, error) {
+	if !jsonArrayHasItems(payload) {
+		return nil, nil
+	}
+	return ParseLangStringNameType(*payload)
+}
+
+func parseSubmodelElementEmbeddedDataSpecifications(smeRow model.SubmodelElementRow) ([]types.IEmbeddedDataSpecification, error) {
+	if !jsonArrayHasItems(smeRow.EmbeddedDataSpecifications) {
+		return nil, nil
+	}
+	jsonAPI := jsoniter.ConfigCompatibleWithStandardLibrary
+	var jsonableValues []map[string]any
+	if err := jsonAPI.Unmarshal(*smeRow.EmbeddedDataSpecifications, &jsonableValues); err != nil {
+		return nil, fmt.Errorf("error unmarshaling embedded data specifications: %w", err)
+	}
+	result := make([]types.IEmbeddedDataSpecification, 0, len(jsonableValues))
+	for index, jsonableValue := range jsonableValues {
+		value, err := jsonization.EmbeddedDataSpecificationFromJsonable(jsonableValue)
+		if err != nil {
+			jsonBytes, _ := jsonAPI.Marshal(jsonableValue)
+			slog.Error("embedded data specification conversion failed", "error.code", "COMMON-BUILDSME-CONVERTEDS", "id_short", smeRow.IDShort.String, "index", index, "error", err)
+			return nil, fmt.Errorf("error converting jsonable to EmbeddedDataSpecification (idShort=%s, index=%d, data: %s): %w", smeRow.IDShort.String, index, string(jsonBytes), err)
+		}
+		result = append(result, value)
+	}
+	return result, nil
+}
+
+func parseSubmodelElementSupplementalSemanticIDs(smeRow model.SubmodelElementRow) ([]types.IReference, error) {
+	if !jsonArrayHasItems(smeRow.SupplementalSemanticIDs) {
+		return nil, nil
+	}
+	jsonAPI := jsoniter.ConfigCompatibleWithStandardLibrary
+	var jsonableValues []map[string]any
+	if err := jsonAPI.Unmarshal(*smeRow.SupplementalSemanticIDs, &jsonableValues); err != nil {
+		return nil, fmt.Errorf("error unmarshaling supplemental semantic IDs: %w", err)
+	}
+	result := make([]types.IReference, 0, len(jsonableValues))
+	for index, jsonableValue := range jsonableValues {
+		value, err := jsonization.ReferenceFromJsonable(jsonableValue)
+		if err != nil {
+			jsonBytes, _ := jsonAPI.Marshal(jsonableValue)
+			slog.Error("supplemental semantic ID conversion failed", "error.code", "COMMON-BUILDSME-CONVERTSUPPLEMENTALID", "id_short", smeRow.IDShort.String, "index", index, "error", err)
+			return nil, fmt.Errorf("error converting jsonable to Reference (idShort=%s, index=%d, data: %s): %w", smeRow.IDShort.String, index, string(jsonBytes), err)
+		}
+		result = append(result, value)
+	}
+	return result, nil
+}
+
+func parseSubmodelElementExtensions(smeRow model.SubmodelElementRow) ([]types.IExtension, error) {
+	if !jsonArrayHasItems(smeRow.Extensions) {
+		return nil, nil
+	}
+	jsonAPI := jsoniter.ConfigCompatibleWithStandardLibrary
+	var jsonableValues []map[string]any
+	if err := jsonAPI.Unmarshal(*smeRow.Extensions, &jsonableValues); err != nil {
+		return nil, fmt.Errorf("error unmarshaling extensions: %w", err)
+	}
+	result := make([]types.IExtension, 0, len(jsonableValues))
+	for index, jsonableValue := range jsonableValues {
+		value, err := jsonization.ExtensionFromJsonable(jsonableValue)
+		if err != nil {
+			jsonBytes, _ := jsonAPI.Marshal(jsonableValue)
+			slog.Error("extension conversion failed", "error.code", "COMMON-BUILDSME-CONVERTEXTENSION", "id_short", smeRow.IDShort.String, "index", index, "error", err)
+			return nil, fmt.Errorf("error converting jsonable to Extension (idShort=%s, index=%d, data: %s): %w", smeRow.IDShort.String, index, string(jsonBytes), err)
+		}
+		result = append(result, value)
+	}
+	return result, nil
+}
+
+func parseSubmodelElementQualifiers(payload *json.RawMessage) ([]types.IQualifier, error) {
+	if !jsonArrayHasItems(payload) {
+		return nil, nil
+	}
+	builder := NewQualifiersBuilder()
+	qualifierRows, err := ParseQualifiersRow(*payload)
+	if err != nil {
+		return nil, err
+	}
+	for _, qualifierRow := range qualifierRows {
+		if _, err = builder.AddQualifier(qualifierRow.DbID, qualifierRow.Type, qualifierRow.ValueType, qualifierRow.Value, qualifierRow.Position, qualifierRow.Kind); err != nil {
+			return nil, err
+		}
+		if _, err = builder.AddSemanticID(qualifierRow.DbID, qualifierRow.SemanticID, qualifierRow.SemanticIDReferredReferences); err != nil {
+			return nil, err
+		}
+		if _, err = builder.AddValueID(qualifierRow.DbID, qualifierRow.ValueID, qualifierRow.ValueIDReferredReferences); err != nil {
+			return nil, err
+		}
+		if _, err = builder.AddSupplementalSemanticIDs(qualifierRow.DbID, qualifierRow.SupplementalSemanticIDs, qualifierRow.SupplementalSemanticIDsReferredReferences); err != nil {
+			return nil, err
+		}
+	}
+	return builder.Build(), nil
+}
+
+func jsonArrayHasItems(payload *json.RawMessage) bool {
+	if payload == nil {
+		return false
+	}
+	trimmed := bytes.TrimSpace(*payload)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("[]")) && !bytes.Equal(trimmed, []byte("null"))
+}
+
+// getSubmodelElementObjectBasedOnModelType determines the specific SubmodelElement type
+// based on the ModelType field in the row and delegates to the appropriate build function.
+// It handles reference building for types that require it.
+func getSubmodelElementObjectBasedOnModelType(smeRow model.SubmodelElementRow, refBuilderMap map[int64]*ReferenceBuilder, refMutex *sync.RWMutex) (types.ISubmodelElement, error) {
+	switch smeRow.ModelType {
+	case int64(types.ModelTypeProperty):
+		prop, err := buildProperty(smeRow, refBuilderMap, refMutex)
+		if err != nil {
+			return nil, err
+		}
+		return prop, nil
+	case int64(types.ModelTypeSubmodelElementCollection):
+		return buildSubmodelElementCollection()
+	case int64(types.ModelTypeOperation):
+		return buildOperation(smeRow)
+	case int64(types.ModelTypeEntity):
+		return buildEntity(smeRow)
+	case int64(types.ModelTypeAnnotatedRelationshipElement):
+		return buildAnnotatedRelationshipElement(smeRow)
+	case int64(types.ModelTypeMultiLanguageProperty):
+		mlProp, err := buildMultiLanguageProperty(smeRow, refBuilderMap, refMutex)
+		if err != nil {
+			return nil, err
+		}
+		return mlProp, nil
+	case int64(types.ModelTypeFile):
+		file, err := buildFile(smeRow)
+		if err != nil {
+			return nil, err
+		}
+		return file, nil
+	case int64(types.ModelTypeBlob):
+		blob, err := buildBlob(smeRow)
+		if err != nil {
+			return nil, err
+		}
+		return blob, nil
+	case int64(types.ModelTypeReferenceElement):
+		return buildReferenceElement(smeRow)
+	case int64(types.ModelTypeRelationshipElement):
+		return buildRelationshipElement(smeRow)
+	case int64(types.ModelTypeRange):
+		rng, err := buildRange(smeRow)
+		if err != nil {
+			return nil, err
+		}
+		return rng, nil
+	case int64(types.ModelTypeBasicEventElement):
+		eventElem, err := buildBasicEventElement(smeRow, refBuilderMap, refMutex)
+		if err != nil {
+			return nil, err
+		}
+		return eventElem, nil
+	case int64(types.ModelTypeSubmodelElementList):
+		return buildSubmodelElementList(smeRow)
+	case int64(types.ModelTypeCapability):
+		capability, err := buildCapability()
+		if err != nil {
+			return nil, err
+		}
+		return capability, nil
+	default:
+		return nil, common.NewInternalServerError(fmt.Sprintf("Received invalid ModelType: %d while constructing SubmodelElement", smeRow.ModelType))
+	}
+}
+
+// buildSubmodelElementCollection creates a new SubmodelElementCollection with an empty value slice.
+func buildSubmodelElementCollection() (types.ISubmodelElement, error) {
+	collection := types.NewSubmodelElementCollection()
+	return collection, nil
+}
+
+// buildProperty constructs a Property SubmodelElement from the database row,
+// including parsing the value and building the associated value reference.
+func buildProperty(smeRow model.SubmodelElementRow, refBuilderMap map[int64]*ReferenceBuilder, refMutex *sync.RWMutex) (types.ISubmodelElement, error) {
+	// If no value data, return a Property with default valueType
+	if smeRow.Value == nil {
+		return types.NewProperty(types.DataTypeDefXSDString), nil
+	}
+
+	var valueRow model.PropertyValueRow
+	err := json.Unmarshal(*smeRow.Value, &valueRow)
+	if err != nil {
+		return nil, err
+	}
+
+	valueID, err := getSingleReference(&valueRow.ValueID, &valueRow.ValueIDReferred, refBuilderMap, refMutex)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert model enum string to SDK enum, default to string if empty
+	valueType := types.DataTypeDefXSD(valueRow.ValueType)
+
+	prop := types.NewProperty(valueType)
+	if valueRow.Value != nil {
+		prop.SetValue(valueRow.Value)
+	}
+	if valueID != nil {
+		prop.SetValueID(valueID)
+	}
+
+	return prop, nil
+}
+
+// buildBasicEventElement constructs a BasicEventElement SubmodelElement from the database row,
+// parsing the event details and building references for observed and message broker.
+func buildBasicEventElement(smeRow model.SubmodelElementRow, refBuilderMap map[int64]*ReferenceBuilder, refMutex *sync.RWMutex) (types.ISubmodelElement, error) {
+	var valueRow model.BasicEventElementValueRow
+	if smeRow.Value == nil {
+		return nil, fmt.Errorf("smeRow.Value is nil")
+	}
+	err := json.Unmarshal(*smeRow.Value, &valueRow)
+	if err != nil {
+		return nil, err
+	}
+
+	observedRefs, err := getSingleReference(&valueRow.Observed, nil, refBuilderMap, refMutex)
+	if err != nil {
+		return nil, err
+	}
+	if observedRefs == nil {
+		return nil, fmt.Errorf("observed reference in BasicEventElement is nil")
+	}
+
+	var messageBrokerRefs types.IReference
+	if valueRow.MessageBroker.Valid {
+		messageBrokerRaw := json.RawMessage(valueRow.MessageBroker.String)
+		messageBrokerRefs, err = getSingleReference(&messageBrokerRaw, nil, refBuilderMap, refMutex)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Convert state and direction strings to SDK enums
+	state := types.StateOfEvent(valueRow.State)
+	direction := types.Direction(valueRow.Direction)
+	bee := types.NewBasicEventElement(observedRefs, direction, state)
+	if valueRow.MessageTopic != "" {
+		bee.SetMessageTopic(&valueRow.MessageTopic)
+	}
+	if valueRow.LastUpdate != "" {
+		bee.SetLastUpdate(&valueRow.LastUpdate)
+	}
+	if valueRow.MinInterval != "" {
+		bee.SetMinInterval(&valueRow.MinInterval)
+	}
+	if valueRow.MaxInterval != "" {
+		bee.SetMaxInterval(&valueRow.MaxInterval)
+	}
+	if messageBrokerRefs != nil {
+		bee.SetMessageBroker(messageBrokerRefs)
+	}
+	return bee, nil
+}
+
+// buildOperation constructs an Operation SubmodelElement from the database row,
+// parsing input, output, and inoutput variables.
+func buildOperation(smeRow model.SubmodelElementRow) (types.ISubmodelElement, error) {
+	var jsonMarshaller = jsoniter.ConfigCompatibleWithStandardLibrary
+	var valueRow model.OperationValueRow
+	if smeRow.Value == nil {
+		return nil, fmt.Errorf("smeRow.Value is nil")
+	}
+	err := jsonMarshaller.Unmarshal(*smeRow.Value, &valueRow)
+	if err != nil {
+		return nil, err
+	}
+
+	var inputVars, outputVars, inoutputVars []types.IOperationVariable
+	if valueRow.InputVariables != nil {
+		var inputVarsJsonable []map[string]any
+		err = jsonMarshaller.Unmarshal(valueRow.InputVariables, &inputVarsJsonable)
+		if err != nil {
+			return nil, err
+		}
+		for i, jsonable := range inputVarsJsonable {
+			varOp, err := jsonization.OperationVariableFromJsonable(jsonable)
+			if err != nil {
+				slog.Error("operation input variable conversion failed", "error.code", "COMMON-BUILDOP-CONVERTINPUT", "index", i, "error", err)
+				return nil, err
+			}
+			inputVars = append(inputVars, varOp)
+		}
+	}
+	if valueRow.OutputVariables != nil {
+		var outputVarsJsonable []map[string]any
+		err = jsonMarshaller.Unmarshal(valueRow.OutputVariables, &outputVarsJsonable)
+		if err != nil {
+			return nil, err
+		}
+		for i, jsonable := range outputVarsJsonable {
+			varOp, err := jsonization.OperationVariableFromJsonable(jsonable)
+			if err != nil {
+				slog.Error("operation output variable conversion failed", "error.code", "COMMON-BUILDOP-CONVERTOUTPUT", "index", i, "error", err)
+				return nil, err
+			}
+			outputVars = append(outputVars, varOp)
+		}
+	}
+	if valueRow.InoutputVariables != nil {
+		var inoutputVarsJsonable []map[string]any
+		err = jsonMarshaller.Unmarshal(valueRow.InoutputVariables, &inoutputVarsJsonable)
+		if err != nil {
+			return nil, err
+		}
+		for i, jsonable := range inoutputVarsJsonable {
+			varOp, err := jsonization.OperationVariableFromJsonable(jsonable)
+			if err != nil {
+				slog.Error("operation in-output variable conversion failed", "error.code", "COMMON-BUILDOP-CONVERTINOUTPUT", "index", i, "error", err)
+				return nil, err
+			}
+			inoutputVars = append(inoutputVars, varOp)
+		}
+	}
+
+	operation := types.NewOperation()
+
+	if len(inputVars) > 0 {
+		operation.SetInputVariables(inputVars)
+	}
+	if len(outputVars) > 0 {
+		operation.SetOutputVariables(outputVars)
+	}
+	if len(inoutputVars) > 0 {
+		operation.SetInoutputVariables(inoutputVars)
+	}
+
+	_ = inputVars
+	_ = outputVars
+	_ = inoutputVars
+	return operation, nil
+}
+
+// getSingleReference parses a single reference from JSON data and builds it using the reference builders.
+// Returns the first reference if available, or nil.
+func getSingleReference(reference *json.RawMessage, referredReference *json.RawMessage, refBuilderMap map[int64]*ReferenceBuilder, refMutex *sync.RWMutex) (types.IReference, error) {
+	if reference == nil {
+		return nil, nil
+	}
+
+	var referenceArrayPayload []map[string]any
+	if unmarshalErr := json.Unmarshal(*reference, &referenceArrayPayload); unmarshalErr == nil {
+		if len(referenceArrayPayload) == 0 {
+			return nil, nil
+		}
+
+		_, isLegacyRowPayload := referenceArrayPayload[0]["reference_id"]
+		if !isLegacyRowPayload {
+			normalizedPayload := normalizeReferenceJsonable(referenceArrayPayload[0])
+			fallbackRef, parseErr := jsonization.ReferenceFromJsonable(normalizedPayload)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			return fallbackRef, nil
+		}
+	}
+
+	parsedRefs, err := ParseReferences(*reference, refBuilderMap, refMutex)
+	if err == nil {
+		if referredReference != nil {
+			if referredErr := ParseReferredReferences(*referredReference, refBuilderMap, refMutex); referredErr != nil {
+				return nil, referredErr
+			}
+		}
+		if len(parsedRefs) > 0 {
+			return parsedRefs[0], nil
+		}
+		return nil, nil
+	}
+
+	var referencePayload map[string]any
+	if unmarshalErr := json.Unmarshal(*reference, &referencePayload); unmarshalErr != nil {
+		if err != nil {
+			return nil, err
+		}
+		return nil, unmarshalErr
+	}
+	if len(referencePayload) == 0 {
+		if err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	normalizedPayload := normalizeReferenceJsonable(referencePayload)
+	fallbackRef, parseErr := jsonization.ReferenceFromJsonable(normalizedPayload)
+	if parseErr != nil {
+		return nil, parseErr
+	}
+
+	return fallbackRef, nil
+}
+
+// buildEntity constructs an Entity SubmodelElement from the database row,
+// parsing the entity type, global asset ID, statements, and specific asset IDs.
+func buildEntity(smeRow model.SubmodelElementRow) (types.ISubmodelElement, error) {
+	var valueRow model.EntityValueRow
+	if smeRow.Value == nil {
+		return nil, fmt.Errorf("smeRow.Value is nil")
+	}
+	err := json.Unmarshal(*smeRow.Value, &valueRow)
+	if err != nil {
+		return nil, err
+	}
+
+	entity := types.NewEntity()
+
+	entityType := types.EntityType(valueRow.EntityType)
+
+	var specificAssetIDs []types.ISpecificAssetID
+	if valueRow.SpecificAssetIDs != nil {
+		var jsonable []map[string]any
+		err = json.Unmarshal(valueRow.SpecificAssetIDs, &jsonable)
+		if err != nil {
+			return nil, err
+		}
+		for i, j := range jsonable {
+			said, err := jsonization.SpecificAssetIDFromJsonable(j)
+			if err != nil {
+				slog.Error("specific asset ID conversion failed", "error.code", "COMMON-BUILDENTITY-CONVERTASSETID", "index", i, "error", err)
+				return nil, err
+			}
+			specificAssetIDs = append(specificAssetIDs, said)
+		}
+		entity.SetSpecificAssetIDs(specificAssetIDs)
+	}
+
+	entity.SetEntityType(&entityType)
+	if valueRow.GlobalAssetID != "" {
+		entity.SetGlobalAssetID(&valueRow.GlobalAssetID)
+	}
+	// SpecificAssetIDs remain as model types for now - full conversion pending
+	return entity, nil
+}
+
+// buildAnnotatedRelationshipElement constructs an AnnotatedRelationshipElement SubmodelElement from the database row,
+// parsing the first and second references, and the annotations.
+func buildAnnotatedRelationshipElement(smeRow model.SubmodelElementRow) (types.ISubmodelElement, error) {
+	var valueRow model.AnnotatedRelationshipElementValueRow
+	if smeRow.Value == nil {
+		return nil, fmt.Errorf("smeRow.Value is nil")
+	}
+	err := json.Unmarshal(*smeRow.Value, &valueRow)
+	if err != nil {
+		return nil, err
+	}
+
+	firstSDK, err := buildOptionalReference(valueRow.First, "first")
+	if err != nil {
+		return nil, err
+	}
+	secondSDK, err := buildOptionalReference(valueRow.Second, "second")
+	if err != nil {
+		return nil, err
+	}
+
+	relElem := types.NewAnnotatedRelationshipElement()
+	if firstSDK != nil {
+		relElem.SetFirst(firstSDK)
+	}
+	if secondSDK != nil {
+		relElem.SetSecond(secondSDK)
+	}
+	return relElem, nil
+}
+
+// buildMultiLanguageProperty creates a new MultiLanguageProperty SubmodelElement.
+func buildMultiLanguageProperty(smeRow model.SubmodelElementRow, refBuilderMap map[int64]*ReferenceBuilder, refMutex *sync.RWMutex) (types.ISubmodelElement, error) {
+	mlp := types.NewMultiLanguageProperty()
+
+	if smeRow.Value == nil {
+		return mlp, nil
+	}
+
+	var valueRow model.MultiLanguagePropertyElementValueRow
+
+	err := json.Unmarshal(*smeRow.Value, &valueRow)
+	if err != nil {
+		return nil, err
+	}
+
+	if valueRow.Value != nil {
+		var valueJsonable []map[string]any
+		err = json.Unmarshal(*valueRow.Value, &valueJsonable)
+		if err != nil {
+			return nil, err
+		}
+		var textTypes []types.ILangStringTextType
+		for _, val := range valueJsonable {
+			// Remove internal database 'id' field before SDK parsing
+			delete(val, "id")
+			valueSDK, err := jsonization.LangStringTextTypeFromJsonable(val)
+			if err != nil {
+				slog.Error("multi-language property value conversion failed", "error.code", "COMMON-BUILDMLP-CONVERTVALUE", "error", err)
+				return nil, err
+			}
+			textTypes = append(textTypes, valueSDK)
+		}
+		mlp.SetValue(textTypes)
+	}
+
+	// Handle ValueID reference if present (same as Property)
+	valueID, err := getSingleReference(valueRow.ValueID, valueRow.ValueIDReferred, refBuilderMap, refMutex)
+	if err != nil {
+		return nil, err
+	}
+	if valueID != nil {
+		mlp.SetValueID(valueID)
+	}
+
+	return mlp, nil
+}
+
+// buildFile creates a new File SubmodelElement.
+func buildFile(smeRow model.SubmodelElementRow) (types.ISubmodelElement, error) {
+	var valueRow model.FileElementValueRow
+	if smeRow.Value == nil {
+		return nil, fmt.Errorf("smeRow.Value is nil")
+	}
+	err := json.Unmarshal(*smeRow.Value, &valueRow)
+	if err != nil {
+		return nil, err
+	}
+	file := types.NewFile()
+	if len(valueRow.ContentType) > 0 {
+		file.SetContentType(&valueRow.ContentType)
+	}
+	if valueRow.Value != "" {
+		file.SetValue(&valueRow.Value)
+	}
+	return file, nil
+}
+
+// buildBlob creates a new Blob SubmodelElement.
+func buildBlob(smeRow model.SubmodelElementRow) (types.ISubmodelElement, error) {
+	var valueRow model.BlobElementValueRow
+	if smeRow.Value == nil {
+		return nil, fmt.Errorf("smeRow.Value is nil")
+	}
+	if err := json.Unmarshal(*smeRow.Value, &valueRow); err != nil {
+		return nil, err
+	}
+
+	blob := types.NewBlob()
+	if valueRow.ContentType != "" {
+		blob.SetContentType(&valueRow.ContentType)
+	}
+
+	// Postgres bytea is commonly returned as: \x<hex>
+	raw := strings.TrimSpace(valueRow.Value)
+	if raw == "" {
+		return blob, nil
+	}
+
+	var decoded []byte
+	var decodedHex []byte
+	var err error
+
+	if strings.HasPrefix(raw, `\x`) || strings.HasPrefix(raw, `\\x`) {
+		// handle "\x..." and "\\x..." (sometimes JSON escaping causes double slash)
+		raw = strings.TrimPrefix(raw, `\\x`)
+		raw = strings.TrimPrefix(raw, `\x`)
+
+		decoded, err = hex.DecodeString(raw)
+		if err != nil {
+			return nil, common.NewInternalServerError("Failed to hex-decode blob value: " + err.Error())
+		}
+		// as fallback copy
+		decodedHex, _ = hex.DecodeString(raw)
+	}
+	decoded, err = common.Decode(string(decoded))
+	if err != nil {
+		decoded = decodedHex // Fallback to hex decoded value
+		slog.Warn("base64 decoding failed; falling back to hexadecimal decoding", "error.code", "BUILDER-BUILDBLOB-FALLBACKHEX")
+	}
+
+	if string(decoded) != "" {
+		blob.SetValue(decoded)
+	}
+	return blob, nil
+}
+
+// buildRange creates a new Range SubmodelElement.
+func buildRange(smeRow model.SubmodelElementRow) (types.ISubmodelElement, error) {
+	var valueRow model.RangeValueRow
+	if smeRow.Value == nil {
+		return nil, fmt.Errorf("smeRow.Value is nil")
+	}
+	err := json.Unmarshal(*smeRow.Value, &valueRow)
+	if err != nil {
+		return nil, err
+	}
+	// Convert value type string to SDK enum
+	valueType := types.DataTypeDefXSD(valueRow.ValueType)
+	rng := types.NewRange(valueType)
+	if valueRow.Min != "" {
+		rng.SetMin(&valueRow.Min)
+	}
+	if valueRow.Max != "" {
+		rng.SetMax(&valueRow.Max)
+	}
+	return rng, nil
+}
+
+// buildCapability creates a new Capability SubmodelElement.
+func buildCapability() (types.ISubmodelElement, error) {
+	return types.NewCapability(), nil
+}
+
+// buildReferenceElement constructs a ReferenceElement SubmodelElement from the database row,
+// parsing the reference value.
+func buildReferenceElement(smeRow model.SubmodelElementRow) (types.ISubmodelElement, error) {
+	var valueRow model.ReferenceElementValueRow
+	if smeRow.Value == nil {
+		return nil, fmt.Errorf("smeRow.Value is nil")
+	}
+	err := json.Unmarshal(*smeRow.Value, &valueRow)
+	if err != nil {
+		return nil, err
+	}
+
+	var refSDK types.IReference
+	if valueRow.Value != nil {
+		refJsonable, parseErr := parseReferenceJsonable(valueRow.Value)
+		err = parseErr
+		if err != nil {
+			return nil, err
+		}
+		// Skip if empty object {} - not a valid Reference
+		if len(refJsonable) > 0 {
+			refSDK, err = jsonization.ReferenceFromJsonable(refJsonable)
+			if err != nil {
+				slog.Error("reference element conversion failed", "error.code", "COMMON-BUILDREFERENCE-CONVERTVALUE", "error", err)
+				return nil, fmt.Errorf("error converting reference jsonable to Reference: %w", err)
+			}
+		}
+	}
+
+	refElem := types.NewReferenceElement()
+	if refSDK != nil {
+		refElem.SetValue(refSDK)
+	}
+	return refElem, nil
+}
+
+// buildRelationshipElement constructs a RelationshipElement SubmodelElement from the database row,
+// parsing the first and second references.
+func buildRelationshipElement(smeRow model.SubmodelElementRow) (types.ISubmodelElement, error) {
+	var valueRow model.RelationshipElementValueRow
+	if smeRow.Value == nil {
+		return nil, fmt.Errorf("smeRow.Value is nil")
+	}
+	err := json.Unmarshal(*smeRow.Value, &valueRow)
+	if err != nil {
+		return nil, err
+	}
+
+	firstSDK, err := buildOptionalReference(valueRow.First, "first")
+	if err != nil {
+		return nil, err
+	}
+	secondSDK, err := buildOptionalReference(valueRow.Second, "second")
+	if err != nil {
+		return nil, err
+	}
+
+	relElem := types.NewRelationshipElement()
+	if firstSDK != nil {
+		relElem.SetFirst(firstSDK)
+	}
+	if secondSDK != nil {
+		relElem.SetSecond(secondSDK)
+	}
+	return relElem, nil
+}
+
+// buildSubmodelElementList constructs a SubmodelElementList SubmodelElement from the database row,
+// parsing the value type and type value list elements.
+func buildSubmodelElementList(smeRow model.SubmodelElementRow) (types.ISubmodelElement, error) {
+	var valueRow model.SubmodelElementListRow
+	if smeRow.Value == nil {
+		return nil, fmt.Errorf("smeRow.Value is nil")
+	}
+	err := json.Unmarshal(*smeRow.Value, &valueRow)
+	if err != nil {
+		return nil, err
+	}
+
+	typeValueListElement := types.AASSubmodelElements(valueRow.TypeValueListElement)
+	smeList := types.NewSubmodelElementList(typeValueListElement)
+
+	// SemanticIDListElement
+	if len(valueRow.SemanticIDListElement) != 0 {
+		jsonable, parseErr := parseReferenceJsonable(valueRow.SemanticIDListElement)
+		err = parseErr
+		if err != nil {
+			return nil, err
+		}
+		// Skip if empty object {} - not a valid Reference
+		if len(jsonable) > 0 {
+			semIDLe, err := jsonization.ReferenceFromJsonable(jsonable)
+			if err != nil {
+				slog.Error("submodel element list semantic ID conversion failed", "error.code", "COMMON-BUILDSMELIST-CONVERTSEMANTICID", "error", err)
+				return nil, fmt.Errorf("error converting SemanticIDListElement jsonable to Reference: %w", err)
+			}
+			smeList.SetSemanticIDListElement(semIDLe)
+		}
+	}
+
+	// Convert type value list element string to SDK enum
+	if valueRow.ValueTypeListElement != nil {
+		valueTypeListElement := types.DataTypeDefXSD(*valueRow.ValueTypeListElement)
+		smeList.SetValueTypeListElement(&valueTypeListElement)
+	}
+
+	// OrderRelevant is already fetched in the main query
+	if valueRow.OrderRelevant != nil {
+		smeList.SetOrderRelevant(valueRow.OrderRelevant)
+	}
+
+	return smeList, nil
+}
+
+func parseReferenceJsonable(raw []byte) (map[string]any, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	var objectPayload map[string]any
+	if err := json.Unmarshal(raw, &objectPayload); err == nil {
+		return normalizeReferenceJsonable(objectPayload), nil
+	}
+
+	var arrayPayload []map[string]any
+	if err := json.Unmarshal(raw, &arrayPayload); err != nil {
+		return nil, err
+	}
+	if len(arrayPayload) == 0 {
+		return nil, nil
+	}
+
+	return normalizeReferenceJsonable(arrayPayload[0]), nil
+}
+
+func buildOptionalReference(raw []byte, fieldName string) (types.IReference, error) {
+	jsonable, err := parseReferenceJsonable(raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(jsonable) == 0 {
+		return nil, nil
+	}
+
+	ref, err := jsonization.ReferenceFromJsonable(jsonable)
+	if err != nil {
+		slog.Error("optional reference conversion failed", "error.code", "COMMON-BUILDREFERENCE-CONVERTOPTIONAL", "field", fieldName, "error", err)
+		return nil, fmt.Errorf("error converting %s jsonable to Reference: %w", fieldName, err)
+	}
+	return ref, nil
+}
+
+func normalizeReferenceJsonable(payload map[string]any) map[string]any {
+	if payload == nil {
+		return nil
+	}
+
+	for key, value := range payload {
+		normalizedKey := strings.ToLower(key)
+		if normalizedKey == "referredsemanticid" {
+			switch typedValue := value.(type) {
+			case []any:
+				if len(typedValue) == 0 {
+					payload[key] = nil
+					continue
+				}
+				payload[key] = normalizeReferenceValue(typedValue[0])
+				continue
+			case []map[string]any:
+				if len(typedValue) == 0 {
+					payload[key] = nil
+					continue
+				}
+				payload[key] = normalizeReferenceJsonable(typedValue[0])
+				continue
+			}
+		}
+
+		payload[key] = normalizeReferenceValue(value)
+	}
+
+	return payload
+}
+
+func normalizeReferenceValue(value any) any {
+	switch typedValue := value.(type) {
+	case map[string]any:
+		return normalizeReferenceJsonable(typedValue)
+	case []map[string]any:
+		normalized := make([]any, 0, len(typedValue))
+		for _, item := range typedValue {
+			normalized = append(normalized, normalizeReferenceJsonable(item))
+		}
+		return normalized
+	case []any:
+		normalized := make([]any, 0, len(typedValue))
+		for _, item := range typedValue {
+			normalized = append(normalized, normalizeReferenceValue(item))
+		}
+		return normalized
+	default:
+		return value
+	}
+}

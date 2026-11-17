@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -243,6 +243,7 @@ func GetQualifierSubquery(dialect goqu.DialectWrapper, joinTable exp.IdentifierE
 			goqu.L("?::text", goqu.I("q.value_num")),
 			goqu.L("?::text", goqu.I("q.value_bool")),
 			goqu.L("?::text", goqu.I("q.value_time")),
+			goqu.L("?::text", goqu.I("q.value_date")),
 			goqu.L("?::text", goqu.I("q.value_datetime")),
 		),
 		goqu.V("semanticIdReferenceRows"), qualifierSemanticIDSubquery,

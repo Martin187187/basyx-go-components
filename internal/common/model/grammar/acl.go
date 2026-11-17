@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -25,6 +25,8 @@
 
 // Package grammar defines the data structures for representing access control lists in the grammar model.
 // Author: Aaron Zielstorff ( Fraunhofer IESE ), Jannik Fried ( Fraunhofer IESE )
+//
+//nolint:all
 package grammar
 
 // ACL (Access Control List) defines the authorization decision and permissions for AAS resources.
@@ -42,13 +44,13 @@ package grammar
 //     Examples: READ, WRITE, DELETE, EXECUTE
 //     Specifies which operations are controlled by this ACL.
 //
-//   - ATTRIBUTES/USEATTRIBUTES: Optional attribute constraints (inline or by reference)
+//   - ATTRIBUTES/USEATTRIBUTES: Attribute constraints (inline or by reference)
 //     Can reference user claims, global attributes, or AAS element properties to
 //     add conditional logic to the access decision.
 //
 // Attribute Handling:
-// ACLs can either define attributes inline (ATTRIBUTES) or reference a previously
-// defined attribute collection by name (USEATTRIBUTES). These attributes provide
+// ACLs define attributes inline (ATTRIBUTES) or reference a previously
+// defined attribute collection by name (USEATTRIBUTES), but not both. These attributes provide
 // context for access decisions, such as user roles, timestamps, or resource properties.
 //
 // Example JSON (with inline attributes):

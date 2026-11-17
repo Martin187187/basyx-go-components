@@ -1,0 +1,58 @@
+{
+  "$condition": {
+    "$and": [
+      {
+        "$or": [
+          {
+            "$eq": [
+              { "$field": "$aasdesc#specificAssetIds[].externalSubjectId.keys[].value" },
+              { "$strVal": "WRITTEN_BY_X" }
+            ]
+          },
+          {
+            "$eq": [
+              { "$field": "$aasdesc#specificAssetIds[].externalSubjectId.keys[].value" },
+              { "$strVal": "WRITTEN_BY_Y" }
+            ]
+          }
+        ]
+      },
+      {
+        "$eq": [
+          { "$field": "$aasdesc#submodelDescriptors[].supplementalSemanticIds" },
+          { "$strVal": "QUERY_ALLOWED" }
+        ]
+      }
+    ]
+  },
+  "$filters": [
+    {
+      "$fragment": "$aasdesc#specificAssetIds[]",
+      "$condition": {
+        "$eq": [
+          { "$field": "$aasdesc#specificAssetIds[].name" },
+          { "$strVal": "customerPartId" }
+        ]
+      }
+    },
+    {
+      "$fragment": "$aasdesc#specificAssetIds[].externalSubjectId",
+      "$condition": {
+        "$eq": [
+          { "$field": "$aasdesc#specificAssetIds[].name" },
+          { "$strVal": "customerPartId" }
+        ]
+      }
+    },
+    {
+      "$fragment": "$aasdesc#submodelDescriptors[].supplementalSemanticIds[]",
+      "$match": true,
+      "$condition": {
+        "$eq": [
+          { "$field": "$aasdesc#submodelDescriptors[].supplementalSemanticIds[].keys[].value" },
+          { "$strVal": "FILTER_VISIBLE" }
+        ]
+      }
+    }
+  ]
+}

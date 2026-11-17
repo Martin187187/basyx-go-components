@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -28,16 +28,19 @@
  *
  * The schemas implementing the [Specification of the Asset Administration Shell: Part 1](https://industrialdigitaltwin.org/en/content-hub/aasspecifications).   Copyright: Industrial Digital Twin Association (IDTA) 2025
  *
- * API version: V3.1.1
+ * API version: V3.2.0
  * Contact: info@idtwin.org
  */
-
+//nolint:all
 package model
 
 import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 )
 
 var (
@@ -72,6 +75,78 @@ func (e *RequiredError) Error() string {
 	return fmt.Sprintf("required field '%s' is zero value.", e.Field)
 }
 
+const (
+	errorMessageType       = "Error"
+	maxCorrelationIDLength = 128
+)
+
+// StatusError is an error that determines its own HTTP status, such as a
+// failed precondition. Its status takes precedence over the fallback status
+// passed to NewErrorResponse.
+type StatusError interface {
+	error
+	HTTPStatus() int
+}
+
+// NewErrorMessage creates an error Message with a UTC timestamp as required by
+// the AAS API Message schema.
+func NewErrorMessage(text, code, correlationID string) Message {
+	return Message{
+		MessageType:   errorMessageType,
+		Text:          text,
+		Code:          code,
+		CorrelationID: correlationID,
+		Timestamp:     time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+// NewErrorCorrelationID creates the correlation ID
+// "<component>-<status>-<function>-<statusText>-<info>", limited to the
+// maximum length of the AAS API Message schema.
+func NewErrorCorrelationID(component string, status int, function, info string) string {
+	statusText := strings.ReplaceAll(http.StatusText(status), " ", "")
+	correlationID := fmt.Sprintf("%s-%d-%s-%s-%s", component, status, function, statusText, info)
+	return truncateRunes(correlationID, maxCorrelationIDLength)
+}
+
+func truncateRunes(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
+}
+
+// NewErrorResponse creates a standardized error response whose body is the
+// AAS API Result object.
+func NewErrorResponse(err error, status int, component, function, info string) ImplResponse {
+	var statusErr StatusError
+	if errors.As(err, &statusErr) {
+		status = statusErr.HTTPStatus()
+	}
+	message := NewErrorMessage(err.Error(), strconv.Itoa(status), NewErrorCorrelationID(component, status, function, info))
+	return Response(status, Result{Messages: []Message{message}})
+}
+
+// ErrorText returns the trimmed text of the first message of an error
+// response body, or an empty string when the body is not a Result with messages.
+func ErrorText(body any) string {
+	result, ok := body.(Result)
+	if !ok || len(result.Messages) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(result.Messages[0].Text)
+}
+
+// WriteErrorResponse writes a standardized error response.
+func WriteErrorResponse(w http.ResponseWriter, err error, status int, component, function, info string) error {
+	response := NewErrorResponse(err, status, component, function, info)
+	return EncodeJSONResponse(response.Body, &response.Code, w)
+}
+
 // ErrorHandler defines the required method for handling error. You may implement it and inject this into a controller if
 // you would like errors to be handled differently from the DefaultErrorHandler
 type ErrorHandler func(w http.ResponseWriter, r *http.Request, err error, result *ImplResponse)
@@ -81,18 +156,19 @@ type ErrorHandler func(w http.ResponseWriter, r *http.Request, err error, result
 func DefaultErrorHandler(w http.ResponseWriter, _ *http.Request, err error, result *ImplResponse) {
 	var parsingErr *ParsingError
 	if ok := errors.As(err, &parsingErr); ok {
-		// Handle parsing errors
-		_ = EncodeJSONResponse(err.Error(), func(i int) *int { return &i }(http.StatusBadRequest), w)
+		_ = WriteErrorResponse(w, err, http.StatusBadRequest, "OPENAPI", "DefaultErrorHandler", "ParseRequest")
 		return
 	}
 
 	var requiredErr *RequiredError
 	if ok := errors.As(err, &requiredErr); ok {
-		// Handle missing required errors
-		_ = EncodeJSONResponse(err.Error(), func(i int) *int { return &i }(http.StatusUnprocessableEntity), w)
+		_ = WriteErrorResponse(w, err, http.StatusUnprocessableEntity, "OPENAPI", "DefaultErrorHandler", "RequiredParameter")
 		return
 	}
 
-	// Handle all other errors
-	_ = EncodeJSONResponse(err.Error(), &result.Code, w)
+	status := http.StatusInternalServerError
+	if result != nil && result.Code != 0 {
+		status = result.Code
+	}
+	_ = WriteErrorResponse(w, err, status, "OPENAPI", "DefaultErrorHandler", "Service")
 }

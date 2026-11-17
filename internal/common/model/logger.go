@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -28,19 +28,19 @@
  *
  * The schemas implementing the [Specification of the Asset Administration Shell: Part 1](https://industrialdigitaltwin.org/en/content-hub/aasspecifications).   Copyright: Industrial Digital Twin Association (IDTA) 2025
  *
- * API version: V3.1.1
+ * API version: V3.2.0
  * Contact: info@idtwin.org
  */
-
+//nolint:all
 package model
 
 import (
 	"net/http"
-
-	"github.com/go-chi/chi/v5/middleware"
 )
 
-// Logger is a middleware that logs the start and end of each request, along with some useful data about what was requested and how long it took.
+// Logger preserves the generated middleware hook for compatibility.
+//
+// Access logging is configured by the hosting application.
 func Logger(inner http.Handler) http.Handler {
-	return middleware.Logger(inner)
+	return inner
 }

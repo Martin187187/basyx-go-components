@@ -1,0 +1,103 @@
+# Project Structure Overview: BaSyx Go Components
+
+This document explains the structure and purpose of each major component in the BaSyx Go Components repository. It is intended to help new developers understand how the codebase is organized and how the different layers interact.
+
+---
+
+## Top-Level Folders
+
+- **cmd/**
+  - Contains service entry points (main.go), configuration files, and Dockerfiles for each microservice (e.g., `aasregistryservice`, `submodelrepositoryservice`).
+  - Each service folder includes its own config and healthcheck scripts.
+
+- **internal/**
+  - Core business logic, persistence, and integration tests.
+  - Organized by domain (e.g., `aasregistry`, `submodelrepository`, `discoveryservice`).
+  - Common package names include `api/`, `persistence/`, `model/`, `builder/`, `integration_tests/`, `query_integration_tests/`, `security_tests/`, and `migration_integration_tests/`.
+
+- **pkg/**
+  - Generated Go server stubs and reusable packages used by services.
+
+- **examples/**
+  - Minimal working examples and sample setups, including Docker Compose files for quick local testing.
+
+- **docu/**
+  - Documentation organized by reader. See [structure_docu.md](structure_docu.md).
+
+- **docu/developer/database/**
+  - In-depth documentation of the database schema, relationships, and usage notes.
+
+- **sql_examples/**
+  - Example SQL scripts for schema setup, sample data, and pagination.
+
+---
+
+## Key Components Explained
+
+### Builders
+- Located in `internal/*/builder/`
+- Used for constructing complex domain objects (e.g., submodels, descriptors) from input data or configuration.
+- Encapsulate creation logic to keep service and API layers clean.
+
+### API Layer
+- Found in `internal/*/api/` and `pkg/*/api.go`
+- Implements REST endpoint logic, request validation, and response formatting.
+- Connects HTTP requests to business logic and persistence.
+- Uses OpenAPI specs for endpoint definitions.
+
+### Model
+- Defined in component packages when needed and in shared model packages used by generated stubs.
+- Contains Go structs and types representing AAS, Submodels, File SME, Registry entries, etc.
+- Used for serialization/deserialization and type safety across the codebase.
+
+### Persistence
+- Located in `internal/*/persistence/`
+- Handles database operations, including CRUD for submodels, registries, and file attachments.
+- Implements logic for PostgreSQL Large Object storage for File SME.
+
+### Routers
+- Found in `pkg/*/routers.go`
+- Maps HTTP routes to handler functions, sets up middleware, and manages request lifecycle.
+- Used by services to expose REST APIs.
+
+### Security
+- In `internal/common/security/`, selected service setup code, `docu/security/`, and `docu/developer/security_architecture.md`
+- Implements authentication, authorization, and security best practices for API endpoints.
+
+### Integration Tests
+- In `internal/*/integration_tests/`
+- End-to-end tests for service APIs, file attachment logic, and database interactions.
+- Use Docker Compose for isolated test environments.
+
+### Benchmarking
+- In package-specific benchmark folders, such as `internal/submodelrepository/benchmark/`.
+- Performance tests and results for critical operations.
+
+---
+
+## How Components Interact
+
+- **API Layer** receives HTTP requests, validates input, and calls **Builders** or **Persistence** logic.
+- **Model** types are used throughout for data exchange and validation.
+- **Persistence** stores and retrieves data, including large files for File SME.
+- **Routers** connect endpoints to handlers and manage middleware.
+- **Security** ensures only authorized access to sensitive operations.
+- **Integration Tests** verify that all layers work together as expected.
+
+---
+
+## Example Workflow: File Attachment
+1. API receives a PUT request to `/submodels/{id}/submodel-elements/{idShort}/attachment`.
+2. Router maps the request to the handler in `internal/submodelrepository/api/`.
+3. Handler validates input and calls the File SME builder/persistence logic.
+4. File is stored in PostgreSQL using Large Object API.
+5. GET requests to `/attachment` return the file, using model types for response formatting.
+
+---
+
+## Further Reading
+- See [README.md](../../README.md) for onboarding and [godoc_tips.md](godoc_tips.md) for GoDoc usage.
+- Explore [docu/developer/database/](database/) for database details.
+- Review OpenAPI specs in `cmd/*/openapi.yaml` for endpoint documentation.
+
+For questions, open an issue or contact the maintainers.

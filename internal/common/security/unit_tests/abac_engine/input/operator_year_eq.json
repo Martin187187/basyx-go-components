@@ -1,0 +1,30 @@
+{
+  "AllAccessPermissionRules": {
+    "rules": [
+      {
+        "ACL": {
+          "ACCESS": "ALLOW",
+          "RIGHTS": ["READ"],
+          "ATTRIBUTES": [{"GLOBAL": "ANONYMOUS"}]
+        },
+        "OBJECTS": [
+          {
+            "ROUTE": "/shell-descriptors"
+          }
+        ],
+        "FORMULA": {
+          "$eq": [
+            {
+              "$year": {
+                "$dateTimeVal": "2025-01-01T00:00:00Z"
+              }
+            },
+            {
+              "$numVal": 2025
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

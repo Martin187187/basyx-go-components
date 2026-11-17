@@ -1,0 +1,376 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+// Author: Martin Stemmer ( Fraunhofer IESE )
+
+package descriptors
+
+import (
+	"context"
+	"database/sql"
+	"log/slog"
+	"time"
+
+	"github.com/FriedJannik/aas-go-sdk/types"
+	"github.com/doug-martin/goqu/v9"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/conditional"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model/grammar"
+	auth "github.com/eclipse-basyx/basyx-go-components/internal/common/security"
+)
+
+type discoveryOnlySpecificAssetIDsKey struct{}
+
+// WithDiscoveryOnlySpecificAssetIDs marks an operation so inserted
+// specific_asset_id rows are linked only via aasRef (descriptor_id stays null).
+func WithDiscoveryOnlySpecificAssetIDs(ctx context.Context) context.Context {
+	return context.WithValue(ctx, discoveryOnlySpecificAssetIDsKey{}, true)
+}
+
+func discoveryOnlySpecificAssetIDsFromContext(ctx context.Context) bool {
+	flag, _ := ctx.Value(discoveryOnlySpecificAssetIDsKey{}).(bool)
+	return flag
+}
+
+var bdColumns = []auth.FilterColumnSpec{
+	auth.Column(common.TSpecificAssetID.Col(common.ColID)),
+	auth.MaskedColumn(common.TSpecificAssetID.Col(common.ColName), "$aasdesc#specificAssetIds[].name"),
+	auth.MaskedColumn(common.TSpecificAssetID.Col(common.ColValue), "$aasdesc#specificAssetIds[].value"),
+	auth.Column(goqu.I("specific_asset_id_payload.semantic_id_payload")),
+	auth.MaskedColumn(goqu.I(common.AliasExternalSubjectReference+"."+common.ColID), "$aasdesc#specificAssetIds[].externalSubjectId"),
+}
+
+// ReadSpecificAssetIDsByAASIdentifier returns SpecificAssetIDs linked via the
+// discovery aas_identifier table.
+func ReadSpecificAssetIDsByAASIdentifier(
+	ctx context.Context,
+	db DBQueryer,
+	aasID string,
+) ([]types.ISpecificAssetID, error) {
+	var aasRef int64
+	d := goqu.Dialect(common.Dialect)
+	tAASIdentifier := goqu.T(common.TblAASIdentifier)
+	sqlStr, args, err := d.
+		From(tAASIdentifier).
+		Select(tAASIdentifier.Col(common.ColID)).
+		Where(tAASIdentifier.Col("aasid").Eq(aasID)).
+		ToSQL()
+	if err != nil {
+		return nil, err
+	}
+	if err := db.QueryRowContext(ctx, sqlStr, args...).Scan(&aasRef); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, common.NewErrNotFound("AAS identifier '" + aasID + "'")
+		}
+		return nil, err
+	}
+	return ReadSpecificAssetIDsByAASRef(ctx, db, aasRef)
+}
+
+// ReadSpecificAssetIDsByAASRef returns SpecificAssetIDs for a discovery AAS ref.
+func ReadSpecificAssetIDsByAASRef(
+	ctx context.Context,
+	db DBQueryer,
+	aasRef int64,
+) ([]types.ISpecificAssetID, error) {
+	if debugEnabled(ctx) {
+		defer func(start time.Time) {
+			slog.DebugContext(ctx, "AAS specific asset ID read completed", "duration", time.Since(start))
+		}(time.Now())
+	}
+
+	d := goqu.Dialect(common.Dialect)
+	tAASIdentifier := goqu.T(common.TblAASIdentifier)
+	tAASDescriptor := goqu.T(common.TblAASDescriptor)
+	externalSubjectReferenceAlias := goqu.T("specific_asset_id_external_subject_id_reference").As(common.AliasExternalSubjectReference)
+	specificAssetIDPayloadAlias := goqu.T(common.TblSpecificAssetIDPayload).As("specific_asset_id_payload")
+	collector, err := grammar.NewResolvedFieldPathCollectorForRoot(grammar.CollectorRootBD)
+	if err != nil {
+		return nil, err
+	}
+	collector.AllowInlineAliases(
+		common.AliasSpecificAssetID,
+		common.AliasExternalSubjectReference,
+	)
+	collector.SetRootJoinKey(common.AliasSpecificAssetID, common.ColAASRef)
+	expressions, err := auth.GetColumnSelectStatement(ctx, bdColumns, collector)
+	if err != nil {
+		return nil, err
+	}
+
+	ds := d.From(common.TSpecificAssetID).
+		InnerJoin(
+			tAASIdentifier,
+			goqu.On(common.TSpecificAssetID.Col(common.ColAASRef).Eq(tAASIdentifier.Col(common.ColID))),
+		).
+		LeftJoin(
+			tAASDescriptor,
+			goqu.On(tAASDescriptor.Col(common.ColAASID).Eq(tAASIdentifier.Col("aasid"))),
+		).
+		LeftJoin(
+			externalSubjectReferenceAlias,
+			goqu.On(externalSubjectReferenceAlias.Col(common.ColID).Eq(common.TSpecificAssetID.Col(common.ColID))),
+		).
+		LeftJoin(
+			specificAssetIDPayloadAlias,
+			goqu.On(specificAssetIDPayloadAlias.Col(common.ColSpecificAssetID).Eq(common.TSpecificAssetID.Col(common.ColID))),
+		).
+		Select(
+			expressions[0],
+			expressions[1],
+			expressions[2],
+			expressions[3],
+			expressions[4],
+		).
+		Where(common.TSpecificAssetID.Col(common.ColAASRef).Eq(aasRef)).
+		Order(
+			common.TSpecificAssetID.Col(common.ColPosition).Asc(),
+			common.TSpecificAssetID.Col(common.ColID).Asc(),
+		)
+
+	shouldEnforceFormula, enforceErr := auth.ShouldEnforceFormula(ctx)
+	if enforceErr != nil {
+		return nil, common.NewInternalServerError("BD-GETSPECIFICASSETID-SHOULDENFORCE " + enforceErr.Error())
+	}
+	if shouldEnforceFormula {
+		ds, err = auth.AddFormulaQueryFromContext(ctx, ds, collector)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	sqlStr, args, err := ds.Prepared(true).ToSQL()
+	if err != nil {
+		return nil, err
+	}
+	if debugEnabled(ctx) {
+		slog.DebugContext(ctx, "specific asset ID discovery query prepared")
+	}
+
+	rows, err := db.QueryContext(ctx, sqlStr, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	type rowData struct {
+		specificID           int64
+		name, value          sql.NullString
+		semanticPayload      []byte
+		externalSubjectRefID sql.NullInt64
+	}
+
+	perRef := make([]rowData, 0, 32)
+	allSpecificIDs := make([]int64, 0, 32)
+
+	for rows.Next() {
+		var r rowData
+		if err := rows.Scan(
+			&r.specificID,
+			&r.name,
+			&r.value,
+			&r.semanticPayload,
+			&r.externalSubjectRefID,
+		); err != nil {
+			return nil, err
+		}
+		perRef = append(perRef, r)
+		allSpecificIDs = append(allSpecificIDs, r.specificID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(allSpecificIDs) == 0 {
+		return []types.ISpecificAssetID{}, nil
+	}
+
+	suppBySpecific, err := readSpecificAssetIDSupplementalSemanticBySpecificIDs(ctx, db, allSpecificIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	extRefBySpecific, err := ReadSpecificAssetExternalSubjectReferencesBySpecificAssetIDs(ctx, db, allSpecificIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]types.ISpecificAssetID, 0, len(perRef))
+	for _, r := range perRef {
+		var extRef types.IReference
+		if r.externalSubjectRefID.Valid {
+			extRef = extRefBySpecific[r.specificID]
+		}
+		semRef, err := parseReferencePayload(r.semanticPayload)
+		if err != nil {
+			return nil, err
+		}
+
+		said := types.NewSpecificAssetID(nvl(r.name), nvl(r.value))
+		said.SetSemanticID(semRef)
+		said.SetExternalSubjectID(extRef)
+		said.SetSupplementalSemanticIDs(suppBySpecific[r.specificID])
+		out = append(out, said)
+	}
+
+	return out, nil
+}
+
+// ReplaceSpecificAssetIDsByAASIdentifier upserts the AAS identifier and replaces
+// all linked SpecificAssetIDs. When some of the replaced links also belong to
+// the shell descriptor, the descriptor changes too. All statements after the
+// upsert run in one round trip.
+func ReplaceSpecificAssetIDsByAASIdentifier(
+	ctx context.Context,
+	db *sql.DB,
+	aasID string,
+	specificAssetIDs []types.ISpecificAssetID,
+) error {
+	return WithTx(ctx, db, func(tx *sql.Tx) error {
+		aasRef, err := ensureDiscoveryEntryTx(ctx, tx, aasID)
+		if err != nil {
+			return err
+		}
+		d := goqu.Dialect(common.Dialect)
+		ownedLinks := d.From(common.TblSpecificAssetID).Select(goqu.L("1")).Where(
+			goqu.C(common.ColAASRef).Eq(aasRef), goqu.C(common.ColDescriptorID).IsNotNull(),
+		)
+		batch := &common.PostgreSQLBatch{}
+		if err = batch.AppendDataset(conditional.RevisionUpsertIfDataset(
+			conditional.Ref(conditional.KindAASDescriptor, aasID), goqu.Exists(ownedLinks),
+		)); err != nil {
+			return common.NewInternalServerError("DISC-REPLACESPECASSETIDS-BUILDREVISION " + err.Error())
+		}
+		if err = batch.AppendDataset(d.Delete(common.TblSpecificAssetID).Where(goqu.C(common.ColAASRef).Eq(aasRef))); err != nil {
+			return common.NewInternalServerError("DISC-REPLACESPECASSETIDS-BUILDDELETE " + err.Error())
+		}
+		if err = batch.AppendSpecificAssetIDs(nil, aasRef, specificAssetIDs); err != nil {
+			return common.NewInternalServerError("DISC-REPLACESPECASSETIDS-BUILDINSERT " + err.Error())
+		}
+		return common.ExecutePostgreSQLBatchInTransaction(ctx, tx, batch.Statements())
+	})
+}
+
+// AddSpecificAssetIDsByAASIdentifier upserts aas_identifier and adds only
+// missing name/value specific asset ids for the linked aasRef. Links are also
+// attached to an existing shell descriptor, which then changes too. All
+// statements after the upsert run in one round trip.
+func AddSpecificAssetIDsByAASIdentifier(
+	ctx context.Context,
+	db *sql.DB,
+	aasID string,
+	specificAssetIDs []types.ISpecificAssetID,
+) error {
+	return WithTx(ctx, db, func(tx *sql.Tx) error {
+		if len(specificAssetIDs) == 0 {
+			return nil
+		}
+
+		aasRef, err := ensureDiscoveryEntryTx(ctx, tx, aasID)
+		if err != nil {
+			return err
+		}
+
+		batch := &common.PostgreSQLBatch{}
+		descriptorID, err := appendLinkedDescriptorRevision(ctx, batch, aasID)
+		if err != nil {
+			return err
+		}
+		if err = batch.AppendDiscoverySpecificAssetIDs(descriptorID, aasRef, specificAssetIDs); err != nil {
+			return common.NewInternalServerError("DISC-ADDSPECASSETIDS-BUILDINSERT " + err.Error())
+		}
+		return common.ExecutePostgreSQLBatchInTransaction(ctx, tx, batch.Statements())
+	})
+}
+
+// appendLinkedDescriptorRevision returns the expression that resolves the
+// shell descriptor added links are attached to and appends the revision
+// write of that descriptor. Discovery-only links belong to no descriptor.
+func appendLinkedDescriptorRevision(ctx context.Context, batch *common.PostgreSQLBatch, aasID string) (any, error) {
+	if discoveryOnlySpecificAssetIDsFromContext(ctx) {
+		return nil, nil
+	}
+	descriptor := goqu.Dialect(common.Dialect).From(common.TAASDescriptor).
+		Select(common.TAASDescriptor.Col(common.ColDescriptorID)).
+		Where(common.TAASDescriptor.Col(common.ColAASID).Eq(aasID))
+	if err := batch.AppendDataset(conditional.RevisionUpsertIfDataset(
+		conditional.Ref(conditional.KindAASDescriptor, aasID), goqu.Exists(descriptor),
+	)); err != nil {
+		return nil, common.NewInternalServerError("DISC-ADDSPECASSETIDS-BUILDREVISION " + err.Error())
+	}
+	return descriptor, nil
+}
+
+// ensureDiscoveryEntryTx upserts the discovery entry of aasID for a
+// discovery write; a caller creating the entry becomes its owner.
+func ensureDiscoveryEntryTx(ctx context.Context, tx *sql.Tx, aasID string) (int64, error) {
+	aasRef, err := ensureAASIdentifierTx(ctx, tx, aasID)
+	if err != nil {
+		return 0, err
+	}
+	return aasRef, auth.RecordReBACResourceCreated(ctx, tx, auth.SemanticResourceBD, aasID)
+}
+
+// ensureIntegratedDiscoveryEntryTx upserts the discovery entry that the
+// discovery integration maintains for a shell descriptor. A new entry
+// inherits the access of the descriptor.
+func ensureIntegratedDiscoveryEntryTx(ctx context.Context, tx *sql.Tx, aasID string) (int64, error) {
+	aasRef, err := ensureAASIdentifierTx(ctx, tx, aasID)
+	if err != nil {
+		return 0, err
+	}
+	sourceCtx := auth.WithReBACSource(ctx, auth.SemanticResourceAASDesc, aasID)
+	return aasRef, auth.RecordReBACResourceCreated(sourceCtx, tx, auth.SemanticResourceBD, aasID)
+}
+
+func ensureAASIdentifierTx(ctx context.Context, tx *sql.Tx, aasID string) (int64, error) {
+	var aasRef int64
+	d := goqu.Dialect(common.Dialect)
+	tAASIdentifier := goqu.T(common.TblAASIdentifier)
+	sqlStr, args, err := d.
+		Insert(common.TblAASIdentifier).
+		Rows(goqu.Record{"aasid": aasID}).
+		OnConflict(
+			goqu.DoUpdate(
+				"aasid",
+				goqu.Record{"aasid": goqu.I("excluded.aasid")},
+			),
+		).
+		Returning(tAASIdentifier.Col(common.ColID), goqu.L("(xmax = 0)")).
+		ToSQL()
+	if err != nil {
+		return 0, err
+	}
+	var inserted bool
+	if err := tx.QueryRowContext(ctx, sqlStr, args...).Scan(&aasRef, &inserted); err != nil {
+		return 0, err
+	}
+	op := conditional.OpUpdate
+	if inserted {
+		op = conditional.OpCreate
+	}
+	return aasRef, TouchDiscoveryEntryTx(ctx, tx, aasID, op)
+}

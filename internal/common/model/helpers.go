@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -28,26 +28,23 @@
  *
  * The schemas implementing the [Specification of the Asset Administration Shell: Part 1](https://industrialdigitaltwin.org/en/content-hub/aasspecifications).   Copyright: Industrial Digital Twin Association (IDTA) 2025
  *
- * API version: V3.1.1
+ * API version: V3.2.0
  * Contact: info@idtwin.org
  */
 
 // Package model provides data structures and utilities for the Asset Administration Shell metamodel.
-// It implements the DotAAS Part 1 Metamodel Schemas according to the IDTA specification.
+// It implements the DotAAS Part 1 Metamodel Schemas according to the IDTA specification.//nolint:all
 package model
 
 import (
 	"encoding/json"
 	"errors"
 	"io"
-	"mime/multipart"
+	"mime"
 	"net/http"
-	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
-	"strconv"
-	"strings"
-	"time"
 )
 
 const errMsgRequiredMissing = "required parameter is missing"
@@ -60,6 +57,63 @@ func Response(code int, body interface{}) ImplResponse {
 		Code: code,
 		Body: body,
 	}
+}
+
+// Redirect is a helper payload type that signals the response encoder to send an HTTP redirect.
+type Redirect struct {
+	Location string
+}
+
+// PlainText is a helper payload type that signals the response encoder to write the body verbatim as text/plain.
+type PlainText string
+
+// WritePlainText writes body verbatim with the text/plain media type and the given status, or 200 OK if status is nil.
+func WritePlainText(w http.ResponseWriter, body PlainText, status *int) error {
+	wHeader := w.Header()
+	wHeader.Set("Content-Type", "text/plain")
+	wHeader.Set("X-Content-Type-Options", "nosniff")
+
+	if status != nil {
+		w.WriteHeader(*status)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+
+	_, err := io.WriteString(w, string(body))
+	return err
+}
+
+// SetSafeDownloadHeaders sets HTTP headers for safely downloading a file, including Content-Type and Content-Disposition.
+func SetSafeDownloadHeaders(wHeader http.Header, filename, contentType string) {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	wHeader.Set("Content-Type", contentType)
+	wHeader.Set("X-Content-Type-Options", "nosniff")
+
+	if filename == "" {
+		wHeader.Set("Content-Disposition", "attachment")
+		return
+	}
+
+	safeFilename := filepath.Base(filename)
+	contentDisposition := mime.FormatMediaType("attachment", map[string]string{"filename": safeFilename})
+	wHeader.Set("Content-Disposition", contentDisposition)
+}
+
+// ResponseWithHeaders builds an ImplResponse and converts a Location header into a Redirect payload
+// so the encoder can set the Location header on the actual HTTP response.
+func ResponseWithHeaders(code int, payload interface{}, headers map[string]string) ImplResponse {
+	// If a Location header is provided and no payload is required, return Redirect so encoder can act.
+	if headers != nil {
+		if loc, ok := headers["Location"]; ok {
+			// Use Redirect as body to signal encoder to set Location header and status.
+			return Response(code, Redirect{Location: loc})
+		}
+	}
+	// fallback to normal response
+	return Response(code, payload)
 }
 
 // IsZeroValue checks if the val is the zero-ed value.
@@ -104,19 +158,40 @@ func AssertRecurseValueRequired[T any](value reflect.Value, callback func(T) err
 func EncodeJSONResponse(i interface{}, status *int, w http.ResponseWriter) error {
 	wHeader := w.Header()
 
+	// Handle Redirect payloads: set Location header and write status without a body.
+	if i != nil {
+		var redirect *Redirect
+		switch r := i.(type) {
+		case Redirect:
+			redirect = &r
+		case *Redirect:
+			redirect = r
+		}
+		if redirect != nil {
+			if status != nil {
+				wHeader.Set("Location", redirect.Location)
+				w.WriteHeader(*status)
+			} else {
+				wHeader.Set("Location", redirect.Location)
+				w.WriteHeader(http.StatusFound)
+			}
+			return nil
+		}
+	}
+
 	f, ok := i.(*os.File)
 	if ok {
 		data, err := io.ReadAll(f)
 		if err != nil {
 			return err
 		}
-		wHeader.Set("Content-Type", http.DetectContentType(data))
-		wHeader.Set("Content-Disposition", "attachment; filename="+f.Name())
+		SetSafeDownloadHeaders(wHeader, f.Name(), "application/octet-stream")
 		if status != nil {
 			w.WriteHeader(*status)
 		} else {
 			w.WriteHeader(http.StatusOK)
 		}
+		// #nosec G705 -- writing binary attachment payload with Content-Disposition attachment and nosniff header
 		_, err = w.Write(data)
 		return err
 	}
@@ -135,90 +210,6 @@ func EncodeJSONResponse(i interface{}, status *int, w http.ResponseWriter) error
 	return nil
 }
 
-// ReadFormFileToTempFile reads file data from a request form and writes it to a temporary file
-func ReadFormFileToTempFile(r *http.Request, key string) (*os.File, error) {
-	_, fileHeader, err := r.FormFile(key)
-	if err != nil {
-		return nil, err
-	}
-
-	return readFileHeaderToTempFile(fileHeader)
-}
-
-// ReadFormFilesToTempFiles reads files array data from a request form and writes it to a temporary files
-func ReadFormFilesToTempFiles(r *http.Request, key string) ([]*os.File, error) {
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		return nil, err
-	}
-
-	files := make([]*os.File, 0, len(r.MultipartForm.File[key]))
-
-	for _, fileHeader := range r.MultipartForm.File[key] {
-		file, err := readFileHeaderToTempFile(fileHeader)
-		if err != nil {
-			return nil, err
-		}
-
-		files = append(files, file)
-	}
-
-	return files, nil
-}
-
-// readFileHeaderToTempFile reads multipart.FileHeader and writes it to a temporary file
-func readFileHeaderToTempFile(fileHeader *multipart.FileHeader) (*os.File, error) {
-	formFile, err := fileHeader.Open()
-	if err != nil {
-		return nil, err
-	}
-
-	defer func() {
-		_ = formFile.Close()
-	}()
-
-	// Use .* as suffix, because the asterisk is a placeholder for the random value,
-	// and the period allows consumers of this file to remove the suffix to obtain the original file name
-	file, err := os.CreateTemp("", fileHeader.Filename+".*")
-	if err != nil {
-		return nil, err
-	}
-
-	defer func() {
-		_ = file.Close()
-	}()
-
-	_, err = io.Copy(file, formFile)
-	if err != nil {
-		return nil, err
-	}
-
-	return file, nil
-}
-
-// nolint:unused
-func parseTimes(param string) ([]time.Time, error) {
-	splits := strings.Split(param, ",")
-	times := make([]time.Time, 0, len(splits))
-	for _, v := range splits {
-		t, err := parseTime(v)
-		if err != nil {
-			return nil, err
-		}
-		times = append(times, t)
-	}
-	return times, nil
-}
-
-// parseTime parses a string parameter into a time.Time using the RFC3339 format.
-// This function is currently unused but kept for potential future use.
-// nolint:unused
-func parseTime(param string) (time.Time, error) {
-	if param == "" {
-		return time.Time{}, nil
-	}
-	return time.Parse(time.RFC3339, param)
-}
-
 // Number is a type constraint that allows numeric types (int32, int64, float32, float64).
 // It's used in generic functions for parsing and validating numeric parameters.
 type Number interface {
@@ -228,58 +219,6 @@ type Number interface {
 // ParseString is a function type for parsing string values into various types.
 // It takes a string value and returns the parsed value of type T and an error if parsing fails.
 type ParseString[T Number | string | bool] func(v string) (T, error)
-
-// parseFloat64 parses a string parameter to an float64.
-// nolint:unused
-func parseFloat64(param string) (float64, error) {
-	if param == "" {
-		return 0, nil
-	}
-
-	return strconv.ParseFloat(param, 64)
-}
-
-// parseFloat32 parses a string parameter to an float32.
-// nolint:unused
-func parseFloat32(param string) (float32, error) {
-	if param == "" {
-		return 0, nil
-	}
-
-	v, err := strconv.ParseFloat(param, 32)
-	return float32(v), err
-}
-
-// parseInt64 parses a string parameter to an int64.
-// nolint:unused
-func parseInt64(param string) (int64, error) {
-	if param == "" {
-		return 0, nil
-	}
-
-	return strconv.ParseInt(param, 10, 64)
-}
-
-// parseInt32 parses a string parameter to an int32.
-// nolint:unused
-func parseInt32(param string) (int32, error) {
-	if param == "" {
-		return 0, nil
-	}
-
-	val, err := strconv.ParseInt(param, 10, 32)
-	return int32(val), err
-}
-
-// parseBool parses a string parameter to an bool.
-// nolint:unused
-func parseBool(param string) (bool, error) {
-	if param == "" {
-		return false, nil
-	}
-
-	return strconv.ParseBool(param)
-}
 
 // HOperation is a function type that handles parameter parsing with optional default values.
 // It returns the parsed value, a boolean indicating if a default was used, and any parsing error.
@@ -343,70 +282,4 @@ func WithMaximum[T Number](expected T) Constraint[T] {
 
 		return nil
 	}
-}
-
-// parseNumericParameter parses a numeric parameter to its respective type.
-// nolint:unused
-func parseNumericParameter[T Number](param string, fn HOperation[T], checks ...Constraint[T]) (T, error) {
-	v, ok, err := fn(param)
-	if err != nil {
-		return 0, err
-	}
-
-	if !ok {
-		for _, check := range checks {
-			if err := check(v); err != nil {
-				return 0, err
-			}
-		}
-	}
-
-	return v, nil
-}
-
-// parseBoolParameter parses a string parameter to a bool
-// nolint:unused
-func parseBoolParameter(param string, fn HOperation[bool]) (bool, error) {
-	v, _, err := fn(param)
-	return v, err
-}
-
-// parseNumericArrayParameter parses a string parameter containing array of values to its respective type.
-// nolint:unused
-func parseNumericArrayParameter[T Number](param, delim string, required bool, fn HOperation[T], checks ...Constraint[T]) ([]T, error) {
-	if param == "" {
-		if required {
-			return nil, errors.New(errMsgRequiredMissing)
-		}
-
-		return nil, nil
-	}
-
-	str := strings.Split(param, delim)
-	values := make([]T, len(str))
-
-	for i, s := range str {
-		v, ok, err := fn(s)
-		if err != nil {
-			return nil, err
-		}
-
-		if !ok {
-			for _, check := range checks {
-				if err := check(v); err != nil {
-					return nil, err
-				}
-			}
-		}
-
-		values[i] = v
-	}
-
-	return values, nil
-}
-
-// parseQuery parses query parameters and returns an error if any malformed value pairs are encountered.
-// nolint:unused
-func parseQuery(rawQuery string) (url.Values, error) {
-	return url.ParseQuery(rawQuery)
 }

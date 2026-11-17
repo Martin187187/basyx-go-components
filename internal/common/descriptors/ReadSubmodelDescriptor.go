@@ -1,0 +1,562 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+// Author: Martin Stemmer ( Fraunhofer IESE )
+
+package descriptors
+
+import (
+	"context"
+	"log/slog"
+	"time"
+
+	"github.com/FriedJannik/aas-go-sdk/types"
+	"github.com/doug-martin/goqu/v9"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model/grammar"
+	auth "github.com/eclipse-basyx/basyx-go-components/internal/common/security"
+	"golang.org/x/sync/errgroup"
+)
+
+// ReadSubmodelDescriptorsByAASDescriptorID returns all submodel descriptors that
+// belong to a single Asset Administration Shell (AAS) identified by its internal
+// descriptor id (not the AAS Id string).
+//
+// The function delegates to ReadSubmodelDescriptorsByAASDescriptorIDs for the
+// heavy lifting and unwraps the single-entry map. The returned slice contains
+// fully materialized submodel descriptors including optional fields such as
+// SemanticId, Administration, DisplayName, Description, Endpoints, Extensions
+// and SupplementalSemanticId where available. The order of results is by
+// internal descriptor id, then the submodel descriptor position, and finally
+// submodel descriptor id ascending.
+//
+// Parameters:
+//   - ctx: request-scoped context used for cancellation and deadlines
+//   - db:  open SQL database handle
+//   - aasDescriptorID: internal descriptor id of the owning AAS
+//
+// Returns the submodel descriptors slice for the given AAS or an error if the
+// query or any of the dependent lookups fail.
+func ReadSubmodelDescriptorsByAASDescriptorID(
+	ctx context.Context,
+	db DBQueryer,
+	aasDescriptorID int64,
+	isMain bool,
+) ([]model.SubmodelDescriptor, error) {
+	v, err := ReadSubmodelDescriptorsByAASDescriptorIDs(ctx, db, []int64{aasDescriptorID}, isMain)
+	return v[aasDescriptorID], err
+}
+
+// ReadSubmodelDescriptorsByDescriptorIDs returns submodel descriptors addressed
+// by their own descriptor IDs (i.e., submodel_descriptor.descriptor_id). This
+// is used for the Submodel Registry Service, where descriptors are not tied to
+// a specific AAS (aas_descriptor_id IS NULL).
+func ReadSubmodelDescriptorsByDescriptorIDs(
+	ctx context.Context,
+	db DBQueryer,
+	descriptorIDs []int64,
+) (map[int64][]model.SubmodelDescriptor, error) {
+	if debugEnabled(ctx) {
+		defer func(start time.Time) {
+			slog.DebugContext(ctx, "submodel descriptor read completed", "duration", time.Since(start))
+		}(time.Now())
+	}
+	if len(descriptorIDs) == 0 {
+		return map[int64][]model.SubmodelDescriptor{}, nil
+	}
+
+	allowParallel := !isTransactionQueryer(db)
+	uniqDesc := descriptorIDs
+
+	d := goqu.Dialect(common.Dialect)
+	payloadAlias := common.TDescriptorPayload.As("smd_payload")
+	semanticRefAlias := goqu.T("submodel_descriptor_semantic_id_reference").As(common.AliasSubmodelDescriptorSemanticIDReference)
+	collector, err := grammar.NewResolvedFieldPathCollectorForRoot(grammar.CollectorRootSMDesc)
+	if err != nil {
+		return nil, err
+	}
+	collector.AllowInlineAliases(
+		common.AliasSubmodelDescriptor,
+		common.AliasSubmodelDescriptorSemanticIDReference,
+	)
+	const dataAlias = "smd_by_desc_data"
+	maskedColumns := []auth.MaskedInnerColumnSpec{
+		{Fragment: "$smdesc#idShort", FlagAlias: "flag_smdesc_idshort", RawAlias: "c2"},
+		{Fragment: "$smdesc#semanticId", FlagAlias: "flag_smdesc_semanticid", RawAlias: "c4"},
+	}
+	maskRuntime, err := auth.BuildSharedFragmentMaskRuntime(ctx, collector, maskedColumns)
+	if err != nil {
+		return nil, err
+	}
+	maskedExpressions, err := maskRuntime.MaskedInnerAliasExprs(dataAlias, maskedColumns)
+	if err != nil {
+		return nil, err
+	}
+
+	inner := d.From(submodelDescriptorAlias).
+		LeftJoin(
+			semanticRefAlias,
+			goqu.On(semanticRefAlias.Col(common.ColID).Eq(submodelDescriptorAlias.Col(common.ColDescriptorID))),
+		).
+		LeftJoin(
+			payloadAlias,
+			goqu.On(payloadAlias.Col(common.ColDescriptorID).Eq(submodelDescriptorAlias.Col(common.ColDescriptorID))),
+		).
+		Select(append([]interface{}{
+			submodelDescriptorAlias.Col(common.ColDescriptorID).As("c0"),
+			submodelDescriptorAlias.Col(common.ColDescriptorID).As("c1"),
+			submodelDescriptorAlias.Col(common.ColIDShort).As("c2"),
+			submodelDescriptorAlias.Col(common.ColAASID).As("c3"),
+			semanticRefAlias.Col(common.ColID).As("c4"),
+			payloadAlias.Col(common.ColAdministrativeInfoPayload).As("c5"),
+			payloadAlias.Col(common.ColDescriptionPayload).As("c6"),
+			payloadAlias.Col(common.ColDisplayNamePayload).As("c7"),
+			payloadAlias.Col(common.ColExtensionsPayload).As("c8"),
+			submodelDescriptorAlias.Col(common.ColPosition).As("sort_smd_position"),
+			submodelDescriptorAlias.Col(common.ColDescriptorID).As("sort_smd_descriptor_id"),
+		}, maskRuntime.Projections()...)...).
+		Where(
+			goqu.And(
+				common.PostgreSQLBigIntArrayContains(submodelDescriptorAlias.Col(common.ColDescriptorID), uniqDesc),
+				submodelDescriptorAlias.Col(common.ColAASDescriptorID).IsNull(),
+			),
+		)
+
+	inner = inner.Order(
+		submodelDescriptorAlias.Col(common.ColPosition).Asc(),
+		submodelDescriptorAlias.Col(common.ColDescriptorID).Asc(),
+	)
+
+	inner, err = maskRuntime.ApplyFilters(ctx, inner, collector)
+	if err != nil {
+		return nil, err
+	}
+	shouldEnforceFormula, enforceErr := auth.ShouldEnforceFormula(ctx)
+	if enforceErr != nil {
+		return nil, common.NewInternalServerError("SMDESC-READ-SHOULDENFORCE " + enforceErr.Error())
+	}
+	if shouldEnforceFormula {
+		inner, err = auth.AddFormulaQueryFromContext(ctx, inner, collector)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	ds := d.From(inner.As(dataAlias)).
+		Select(
+			goqu.I(dataAlias+".c0"),
+			goqu.I(dataAlias+".c1"),
+			maskedExpressions[0],
+			goqu.I(dataAlias+".c3"),
+			maskedExpressions[1],
+			goqu.I(dataAlias+".c5"),
+			goqu.I(dataAlias+".c6"),
+			goqu.I(dataAlias+".c7"),
+			goqu.I(dataAlias+".c8"),
+		).
+		Order(
+			goqu.I(dataAlias+".sort_smd_position").Asc(),
+			goqu.I(dataAlias+".sort_smd_descriptor_id").Asc(),
+		)
+
+	perDesc, allSmdDescIDs, err := readSubmodelDescriptorRows(ctx, db, ds, len(uniqDesc), len(uniqDesc))
+	if err != nil {
+		return nil, err
+	}
+
+	return materializeSubmodelDescriptors(
+		ctx,
+		db,
+		uniqDesc,
+		perDesc,
+		allSmdDescIDs,
+		allowParallel,
+	)
+}
+
+// ReadSubmodelDescriptorsByAASDescriptorIDs returns all submodel descriptors for
+// a set of AAS descriptor ids (internal ids, not AAS Id strings). Results are
+// grouped by AAS descriptor id in the returned map. The function performs a
+// single base query to collect submodel rows and then issues batched lookups to
+// materialize related data (semantic references, administrative information,
+// language strings, extensions, endpoints and supplemental semantic references).
+// Extension payloads are carried by the base rows; independent lookups are
+// executed concurrently using errgroup to reduce latency.
+//
+// If an AAS descriptor id from the input has no submodel descriptors, the map
+// will contain that key with a nil slice to signal an empty result explicitly.
+// When the input is empty, an empty map is returned.
+//
+// Parameters:
+//   - ctx: request-scoped context used for cancellation and deadlines
+//   - db:  open SQL database handle
+//   - aasDescriptorIDs: list of internal AAS descriptor ids to fetch for
+//
+// Returns a map keyed by AAS descriptor id with the corresponding submodel
+// descriptors or an error if any query fails.
+func ReadSubmodelDescriptorsByAASDescriptorIDs(
+	ctx context.Context,
+	db DBQueryer,
+	aasDescriptorIDs []int64,
+	isMain bool,
+) (map[int64][]model.SubmodelDescriptor, error) {
+	if debugEnabled(ctx) {
+		defer func(start time.Time) {
+			slog.DebugContext(ctx, "AAS submodel descriptor read completed", "duration", time.Since(start))
+		}(time.Now())
+	}
+	out := make(map[int64][]model.SubmodelDescriptor, len(aasDescriptorIDs))
+	if len(aasDescriptorIDs) == 0 {
+		return out, nil
+	}
+
+	allowParallel := !isTransactionQueryer(db)
+	uniqAASDesc := aasDescriptorIDs
+
+	d := goqu.Dialect(common.Dialect)
+	payloadAlias := common.TDescriptorPayload.As("smd_payload")
+	semanticRefAlias := goqu.T("submodel_descriptor_semantic_id_reference").As(common.AliasSubmodelDescriptorSemanticIDReference)
+	collector, err := grammar.NewResolvedFieldPathCollectorForNestedSMDesc()
+	if err != nil {
+		return nil, err
+	}
+	collector.AllowInlineAliases(
+		"descriptor",
+		"aas_descriptor",
+		common.AliasSubmodelDescriptor,
+		common.AliasSubmodelDescriptorSemanticIDReference,
+	)
+	const dataAlias = "smd_by_aas_data"
+	maskedColumns := []auth.MaskedInnerColumnSpec{
+		{Fragment: "$aasdesc#submodelDescriptors[].idShort", FlagAlias: "flag_aas_smdesc_idshort", RawAlias: "c2"},
+		{Fragment: "$aasdesc#submodelDescriptors[].semanticId", FlagAlias: "flag_aas_smdesc_semanticid", RawAlias: "c4"},
+	}
+	maskRuntime, err := auth.BuildSharedFragmentMaskRuntime(ctx, collector, maskedColumns)
+	if err != nil {
+		return nil, err
+	}
+	maskedExpressions, err := maskRuntime.MaskedInnerAliasExprs(dataAlias, maskedColumns)
+	if err != nil {
+		return nil, err
+	}
+	inner := d.From(common.TDescriptor).
+		InnerJoin(
+			common.TAASDescriptor,
+			goqu.On(common.TAASDescriptor.Col(common.ColDescriptorID).Eq(common.TDescriptor.Col(common.ColID))),
+		).
+		LeftJoin(
+			submodelDescriptorAlias,
+			goqu.On(submodelDescriptorAlias.Col(common.ColAASDescriptorID).Eq(common.TAASDescriptor.Col(common.ColDescriptorID))),
+		).
+		LeftJoin(
+			semanticRefAlias,
+			goqu.On(semanticRefAlias.Col(common.ColID).Eq(submodelDescriptorAlias.Col(common.ColDescriptorID))),
+		).
+		LeftJoin(
+			payloadAlias,
+			goqu.On(payloadAlias.Col(common.ColDescriptorID).Eq(submodelDescriptorAlias.Col(common.ColDescriptorID))),
+		).
+		Select(append([]interface{}{
+			submodelDescriptorAlias.Col(common.ColAASDescriptorID).As("c0"),
+			submodelDescriptorAlias.Col(common.ColDescriptorID).As("c1"),
+			submodelDescriptorAlias.Col(common.ColIDShort).As("c2"),
+			submodelDescriptorAlias.Col(common.ColAASID).As("c3"),
+			semanticRefAlias.Col(common.ColID).As("c4"),
+			payloadAlias.Col(common.ColAdministrativeInfoPayload).As("c5"),
+			payloadAlias.Col(common.ColDescriptionPayload).As("c6"),
+			payloadAlias.Col(common.ColDisplayNamePayload).As("c7"),
+			payloadAlias.Col(common.ColExtensionsPayload).As("c8"),
+			submodelDescriptorAlias.Col(common.ColPosition).As("sort_smd_position"),
+			submodelDescriptorAlias.Col(common.ColDescriptorID).As("sort_smd_descriptor_id"),
+		}, maskRuntime.Projections()...)...).
+		Where(common.PostgreSQLBigIntArrayContains(submodelDescriptorAlias.Col(common.ColAASDescriptorID), uniqAASDesc))
+
+	inner = inner.Order(
+		submodelDescriptorAlias.Col(common.ColPosition).Asc(),
+		submodelDescriptorAlias.Col(common.ColDescriptorID).Asc(),
+	)
+
+	inner, err = auth.AddCorrelatedFilterQueryFromContext(ctx, inner, "$aasdesc#submodelDescriptors[]", collector)
+	if err != nil {
+		return nil, err
+	}
+	if isMain {
+		shouldEnforceFormula, enforceErr := auth.ShouldEnforceFormula(ctx)
+		if enforceErr != nil {
+			return nil, common.NewInternalServerError("SMDESC-READBYAAS-SHOULDENFORCE " + enforceErr.Error())
+		}
+		if shouldEnforceFormula {
+			inner, err = auth.AddFormulaQueryFromContext(ctx, inner, collector)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	ds := d.From(inner.As(dataAlias)).
+		Select(
+			goqu.I(dataAlias+".c0"),
+			goqu.I(dataAlias+".c1"),
+			maskedExpressions[0],
+			goqu.I(dataAlias+".c3"),
+			maskedExpressions[1],
+			goqu.I(dataAlias+".c5"),
+			goqu.I(dataAlias+".c6"),
+			goqu.I(dataAlias+".c7"),
+			goqu.I(dataAlias+".c8"),
+		).
+		Order(
+			goqu.I(dataAlias+".sort_smd_position").Asc(),
+			goqu.I(dataAlias+".sort_smd_descriptor_id").Asc(),
+		)
+
+	perAAS, allSmdDescIDs, err := readSubmodelDescriptorRows(ctx, db, ds, len(uniqAASDesc), 10000)
+	if err != nil {
+		return nil, err
+	}
+
+	return materializeSubmodelDescriptors(
+		ctx,
+		db,
+		uniqAASDesc,
+		perAAS,
+		allSmdDescIDs,
+		allowParallel,
+	)
+}
+
+func materializeSubmodelDescriptors(
+	ctx context.Context,
+	db DBQueryer,
+	groupIDs []int64,
+	perGroup map[int64][]model.SubmodelDescriptorRow,
+	allSmdDescIDs []int64,
+	allowParallel bool,
+) (map[int64][]model.SubmodelDescriptor, error) {
+	out := make(map[int64][]model.SubmodelDescriptor, len(groupIDs))
+	if len(allSmdDescIDs) == 0 {
+		ensureSubmodelDescriptorGroups(out, groupIDs)
+		return out, nil
+	}
+
+	lookups, err := loadSubmodelDescriptorLookups(
+		ctx,
+		db,
+		allSmdDescIDs,
+		allowParallel,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := assembleSubmodelDescriptors(out, perGroup, lookups); err != nil {
+		return nil, err
+	}
+	ensureSubmodelDescriptorGroups(out, groupIDs)
+	return out, nil
+}
+
+type submodelDescriptorLookups struct {
+	semRefBySmdDesc map[int64]types.IReference
+	suppBySmdDesc   map[int64][]types.IReference
+	endpointsByDesc map[int64][]model.Endpoint
+}
+
+func newSubmodelDescriptorLookups() submodelDescriptorLookups {
+	return submodelDescriptorLookups{
+		semRefBySmdDesc: map[int64]types.IReference{},
+		suppBySmdDesc:   map[int64][]types.IReference{},
+		endpointsByDesc: map[int64][]model.Endpoint{},
+	}
+}
+
+func loadSubmodelDescriptorLookups(
+	ctx context.Context,
+	db DBQueryer,
+	smdDescIDs []int64,
+	allowParallel bool,
+) (submodelDescriptorLookups, error) {
+	if allowParallel {
+		return loadSubmodelDescriptorLookupsParallel(ctx, db, smdDescIDs)
+	}
+	return loadSubmodelDescriptorLookupsSerial(ctx, db, smdDescIDs)
+}
+
+func loadSubmodelDescriptorLookupsParallel(
+	ctx context.Context,
+	db DBQueryer,
+	smdDescIDs []int64,
+) (submodelDescriptorLookups, error) {
+	lookups := newSubmodelDescriptorLookups()
+	g, gctx := errgroup.WithContext(ctx)
+
+	if len(smdDescIDs) > 0 {
+		ids := smdDescIDs
+		GoAssign(g, func() (map[int64]types.IReference, error) {
+			return ReadSubmodelDescriptorSemanticReferencesByDescriptorIDs(gctx, db, ids)
+		}, &lookups.semRefBySmdDesc)
+
+		GoAssign(g, func() (map[int64][]types.IReference, error) {
+			return ReadSubmodelDescriptorSupplementalSemanticReferencesByDescriptorIDs(gctx, db, ids)
+		}, &lookups.suppBySmdDesc)
+
+		GoAssign(g, func() (map[int64][]model.Endpoint, error) {
+			return ReadEndpointsByDescriptorIDs(gctx, db, ids, "submodel")
+		}, &lookups.endpointsByDesc)
+	}
+
+	if err := g.Wait(); err != nil {
+		return submodelDescriptorLookups{}, err
+	}
+	return lookups, nil
+}
+
+func loadSubmodelDescriptorLookupsSerial(
+	ctx context.Context,
+	db DBQueryer,
+	smdDescIDs []int64,
+) (submodelDescriptorLookups, error) {
+	lookups := newSubmodelDescriptorLookups()
+	var err error
+
+	if len(smdDescIDs) > 0 {
+		lookups.semRefBySmdDesc, err = ReadSubmodelDescriptorSemanticReferencesByDescriptorIDs(ctx, db, smdDescIDs)
+		if err != nil {
+			return submodelDescriptorLookups{}, err
+		}
+		lookups.suppBySmdDesc, err = ReadSubmodelDescriptorSupplementalSemanticReferencesByDescriptorIDs(ctx, db, smdDescIDs)
+		if err != nil {
+			return submodelDescriptorLookups{}, err
+		}
+		lookups.endpointsByDesc, err = ReadEndpointsByDescriptorIDs(ctx, db, smdDescIDs, "submodel")
+		if err != nil {
+			return submodelDescriptorLookups{}, err
+		}
+	}
+
+	return lookups, nil
+}
+
+func assembleSubmodelDescriptors(
+	out map[int64][]model.SubmodelDescriptor,
+	perGroup map[int64][]model.SubmodelDescriptorRow,
+	lookups submodelDescriptorLookups,
+) error {
+	for groupID, rows := range perGroup {
+		for _, r := range rows {
+			var semanticID types.IReference
+			if r.SemanticRefID.Valid {
+				semanticID = lookups.semRefBySmdDesc[r.SmdDescID]
+			}
+			admin, err := parseAdministrativeInfoPayload(r.AdministrativeInfoPayload)
+			if err != nil {
+				return common.NewInternalServerError("SMDESC-READ-ADMINPAYLOAD")
+			}
+			displayName, err := parseLangStringNamePayload(r.DisplayNamePayload)
+			if err != nil {
+				return common.NewInternalServerError("SMDESC-READ-DISPLAYNAMEPAYLOAD")
+			}
+			description, err := parseLangStringTextPayload(r.DescriptionPayload)
+			if err != nil {
+				return common.NewInternalServerError("SMDESC-READ-DESCRIPTIONPAYLOAD")
+			}
+			extensions, err := parseExtensionsPayload(r.ExtensionsPayload)
+			if err != nil {
+				return common.NewInternalServerError("SMDESC-READ-EXTENSIONSPAYLOAD " + err.Error())
+			}
+
+			out[groupID] = append(out[groupID], model.SubmodelDescriptor{
+				IdShort:                r.IDShort.String,
+				Id:                     r.ID.String,
+				SemanticId:             semanticID,
+				Administration:         admin,
+				DisplayName:            displayName,
+				Description:            description,
+				Endpoints:              lookups.endpointsByDesc[r.SmdDescID],
+				Extensions:             extensions,
+				SupplementalSemanticId: lookups.suppBySmdDesc[r.SmdDescID],
+			})
+		}
+	}
+	return nil
+}
+
+func ensureSubmodelDescriptorGroups(out map[int64][]model.SubmodelDescriptor, groupIDs []int64) {
+	for _, id := range groupIDs {
+		if _, ok := out[id]; !ok {
+			out[id] = nil
+		}
+	}
+}
+
+func readSubmodelDescriptorRows(
+	ctx context.Context,
+	db DBQueryer,
+	ds *goqu.SelectDataset,
+	perGroupCap int,
+	allSmdDescCap int,
+) (map[int64][]model.SubmodelDescriptorRow, []int64, error) {
+	sqlStr, args, err := ds.Prepared(true).ToSQL()
+	if err != nil {
+		return nil, nil, err
+	}
+	if debugEnabled(ctx) {
+		slog.DebugContext(ctx, "submodel descriptor database query prepared")
+	}
+	rows, err := db.QueryContext(ctx, sqlStr, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	perGroup := make(map[int64][]model.SubmodelDescriptorRow, perGroupCap)
+	allSmdDescIDs := make([]int64, 0, allSmdDescCap)
+
+	for rows.Next() {
+		var r model.SubmodelDescriptorRow
+		if err := rows.Scan(
+			&r.AasDescID,
+			&r.SmdDescID,
+			&r.IDShort,
+			&r.ID,
+			&r.SemanticRefID,
+			&r.AdministrativeInfoPayload,
+			&r.DescriptionPayload,
+			&r.DisplayNamePayload,
+			&r.ExtensionsPayload,
+		); err != nil {
+			return nil, nil, err
+		}
+		perGroup[r.AasDescID] = append(perGroup[r.AasDescID], r)
+		allSmdDescIDs = append(allSmdDescIDs, r.SmdDescID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	return perGroup, allSmdDescIDs, nil
+}

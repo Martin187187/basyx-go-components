@@ -1,0 +1,744 @@
+# Query Language Examples
+
+This guide shows concrete query and ABAC filter inputs together with the
+expected result. For the expression grammar and SQL translation details, see
+the [query language architecture guide](../developer/query_language/architecture.md).
+
+## Supported query endpoints
+
+| Endpoint | Main field roots | Typical content |
+| --- | --- | --- |
+| `POST /query/shells` | `$aas`; additionally `$sm` and `$sme` in the AAS Environment Service | Asset Administration Shells and, in the AAS Environment Service, their referenced local Submodels and elements |
+| `POST /query/submodels` | `$sm`, `$sme` | Submodels and their elements |
+| `POST /query/shell-descriptors` | `$aasdesc`, nested `$smdesc` | AAS Descriptors and nested Submodel Descriptors |
+| `POST /query/submodel-descriptors` | `$smdesc` | Submodel Descriptors |
+
+Every request requires a top-level `$condition`. It selects the parent objects
+in `result`. Optional `$filters` shape fragments inside those objects. Available
+field paths depend on the endpoint's model and reader.
+
+Logical `$match` inside `$condition` requires all contained predicates to hold
+in one shared list or hierarchy scope. The separate `$match` flag on a
+`$filters` entry changes whether that fragment condition is evaluated at parent
+scope or against the current fragment row.
+
+Each example shows the complete expected response for the displayed starting
+object, including `paging_metadata`, the parent object, unchanged displayed
+fields, and the filtered fragments. The starting objects intentionally contain
+only the fields needed to demonstrate the behavior.
+
+## 1. Select parent resources
+
+Starting data:
+
+```json
+[
+  { "id": "urn:sm:motor", "idShort": "Motor" },
+  { "id": "urn:sm:pump", "idShort": "Pump" }
+]
+```
+
+Request:
+
+```http
+POST /query/submodels
+Content-Type: application/json
+```
+
+```json
+{
+  "$condition": {
+    "$eq": [
+      { "$field": "$sm#idShort" },
+      { "$strVal": "Motor" }
+    ]
+  }
+}
+```
+
+Expected result:
+
+```json
+{
+  "paging_metadata": {},
+  "result": [
+    { "id": "urn:sm:motor", "idShort": "Motor" }
+  ]
+}
+```
+
+The top-level condition removes the `Pump` parent from `result`. It does not
+mask individual fragments inside `Motor`.
+
+### Select AASs by referenced Submodel content
+
+On the AAS Environment Service's `/query/shells` endpoint, `$sm` searches only
+Submodels referenced by the candidate AAS, and `$sme` searches their elements.
+This extension is not currently enabled by the standalone AAS Repository
+Service. The following query returns an AAS only when one of its referenced
+`CarbonFootprint` Submodels has the specified property value:
+
+```json
+{
+  "$condition": {
+    "$match": [
+      {
+        "$eq": [
+          { "$field": "$sm#idShort" },
+          { "$strVal": "CarbonFootprint" }
+        ]
+      },
+      {
+        "$lt": [
+          { "$numCast": { "$field": "$sme.AggregatedCarbonFootprint#value" } },
+          { "$numVal": 48 }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Replacing `$match` with `$and` gives the conditions independent hierarchy
+scopes: one referenced Submodel may satisfy the `idShort` comparison while a
+different referenced Submodel supplies the matching element.
+
+## 2. Keep a complete fragment with existential matching
+
+Starting Submodel:
+
+```json
+{
+  "id": "urn:sm:motor",
+  "idShort": "Motor",
+  "supplementalSemanticIds": [
+    {
+      "type": "ExternalReference",
+      "keys": [{ "type": "GlobalReference", "value": "VISIBLE" }]
+    },
+    {
+      "type": "ExternalReference",
+      "keys": [{ "type": "GlobalReference", "value": "INTERNAL" }]
+    }
+  ]
+}
+```
+
+Request with `$match` omitted:
+
+```json
+{
+  "$condition": {
+    "$eq": [
+      { "$field": "$sm#id" },
+      { "$strVal": "urn:sm:motor" }
+    ]
+  },
+  "$filters": [
+    {
+      "$fragment": "$sm#supplementalSemanticIds[]",
+      "$condition": {
+        "$eq": [
+          { "$field": "$sm#supplementalSemanticIds[].keys[].value" },
+          { "$strVal": "VISIBLE" }
+        ]
+      }
+    }
+  ]
+}
+```
+
+Expected result:
+
+```json
+{
+  "paging_metadata": {},
+  "result": [
+    {
+      "id": "urn:sm:motor",
+      "idShort": "Motor",
+      "supplementalSemanticIds": [
+        {
+          "type": "ExternalReference",
+          "keys": [{ "type": "GlobalReference", "value": "VISIBLE" }]
+        },
+        {
+          "type": "ExternalReference",
+          "keys": [{ "type": "GlobalReference", "value": "INTERNAL" }]
+        }
+      ]
+    }
+  ]
+}
+```
+
+The condition is evaluated at parent scope. Because one reference contains
+`VISIBLE`, the complete fragment is preserved. Setting `$match` to `false` has
+the same effect.
+
+## 3. Return only matching fragment rows
+
+Use the same starting data as example 2, but explicitly set `$match`:
+
+```json
+{
+  "$condition": {
+    "$eq": [
+      { "$field": "$sm#id" },
+      { "$strVal": "urn:sm:motor" }
+    ]
+  },
+  "$filters": [
+    {
+      "$fragment": "$sm#supplementalSemanticIds[]",
+      "$match": true,
+      "$condition": {
+        "$eq": [
+          { "$field": "$sm#supplementalSemanticIds[].keys[].value" },
+          { "$strVal": "VISIBLE" }
+        ]
+      }
+    }
+  ]
+}
+```
+
+Expected result:
+
+```json
+{
+  "paging_metadata": {},
+  "result": [
+    {
+      "id": "urn:sm:motor",
+      "idShort": "Motor",
+      "supplementalSemanticIds": [
+        {
+          "type": "ExternalReference",
+          "keys": [{ "type": "GlobalReference", "value": "VISIBLE" }]
+        }
+      ]
+    }
+  ]
+}
+```
+
+`$match: true` binds the condition to the reference currently being
+reconstructed, so the `INTERNAL` sibling is removed.
+
+## 4. Match nested Submodel Element Lists
+
+Starting structure, shortened to the relevant fields:
+
+```json
+{
+  "id": "urn:sm:nested",
+  "submodelElements": [
+    {
+      "idShort": "a",
+      "modelType": "SubmodelElementList",
+      "value": [
+        {
+          "modelType": "SubmodelElementCollection",
+          "value": [
+            {
+              "idShort": "b",
+              "modelType": "SubmodelElementList",
+              "value": [
+                { "modelType": "Property", "value": "a0-b0" },
+                { "modelType": "Property", "value": "a0-b1" }
+              ]
+            }
+          ]
+        },
+        {
+          "modelType": "SubmodelElementCollection",
+          "value": [
+            {
+              "idShort": "b",
+              "modelType": "SubmodelElementList",
+              "value": [
+                { "modelType": "Property", "value": "a1-b0" },
+                { "modelType": "Property", "value": "a1-b1" }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+Request:
+
+```json
+{
+  "$condition": {
+    "$eq": [
+      { "$field": "$sm#id" },
+      { "$strVal": "urn:sm:nested" }
+    ]
+  },
+  "$filters": [
+    {
+      "$fragment": "$sme.a[].b[]",
+      "$match": true,
+      "$condition": {
+        "$ends-with": [
+          { "$field": "$sme.a[].b[]#value" },
+          { "$strVal": "-b0" }
+        ]
+      }
+    }
+  ]
+}
+```
+
+Expected result:
+
+```json
+{
+  "paging_metadata": {},
+  "result": [
+    {
+      "id": "urn:sm:nested",
+      "submodelElements": [
+        {
+          "idShort": "a",
+          "modelType": "SubmodelElementList",
+          "value": [
+            {
+              "modelType": "SubmodelElementCollection",
+              "value": [
+                {
+                  "idShort": "b",
+                  "modelType": "SubmodelElementList",
+                  "value": [
+                    { "modelType": "Property", "value": "a0-b0" }
+                  ]
+                }
+              ]
+            },
+            {
+              "modelType": "SubmodelElementCollection",
+              "value": [
+                {
+                  "idShort": "b",
+                  "modelType": "SubmodelElementList",
+                  "value": [
+                    { "modelType": "Property", "value": "a1-b0" }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+The outer `a[]` structure is unchanged. Inside `a[0]`, `a0-b0` remains and
+`a0-b1` is removed. Inside `a[1]`, `a1-b0` remains and `a1-b1` is removed.
+Each `[]` is bound to the current numeric list index, so values from `a[0]`
+cannot satisfy the condition for `a[1]`.
+
+### Indexed variant
+
+An indexed fragment can target only one branch. Full request:
+
+```json
+{
+  "$condition": {
+    "$eq": [
+      { "$field": "$sm#id" },
+      { "$strVal": "urn:sm:nested" }
+    ]
+  },
+  "$filters": [
+    {
+      "$fragment": "$sme.a[1].b[]",
+      "$match": true,
+      "$condition": {
+        "$ends-with": [
+          { "$field": "$sme.a[].b[]#value" },
+          { "$strVal": "-b0" }
+        ]
+      }
+    }
+  ]
+}
+```
+
+Expected result:
+
+```json
+{
+  "paging_metadata": {},
+  "result": [
+    {
+      "id": "urn:sm:nested",
+      "submodelElements": [
+        {
+          "idShort": "a",
+          "modelType": "SubmodelElementList",
+          "value": [
+            {
+              "modelType": "SubmodelElementCollection",
+              "value": [
+                {
+                  "idShort": "b",
+                  "modelType": "SubmodelElementList",
+                  "value": [
+                    { "modelType": "Property", "value": "a0-b0" },
+                    { "modelType": "Property", "value": "a0-b1" }
+                  ]
+                }
+              ]
+            },
+            {
+              "modelType": "SubmodelElementCollection",
+              "value": [
+                {
+                  "idShort": "b",
+                  "modelType": "SubmodelElementList",
+                  "value": [
+                    { "modelType": "Property", "value": "a1-b0" }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+`a[0].b` remains complete, while only `a[1].b` is filtered.
+
+## 5. Filter multiple fragments independently
+
+A Submodel Descriptor can filter endpoints and supplemental semantic IDs in the
+same request. Starting descriptor:
+
+```json
+{
+  "id": "urn:smdesc:motor",
+  "endpoints": [
+    {
+      "interface": "SUBMODEL-3.0",
+      "protocolInformation": { "href": "https://public.example/motor" }
+    },
+    {
+      "interface": "SUBMODEL-2.0",
+      "protocolInformation": { "href": "https://legacy.example/motor" }
+    }
+  ],
+  "supplementalSemanticIds": [
+    {
+      "type": "ExternalReference",
+      "keys": [{ "type": "GlobalReference", "value": "PUBLIC" }]
+    },
+    {
+      "type": "ExternalReference",
+      "keys": [{ "type": "GlobalReference", "value": "INTERNAL" }]
+    }
+  ]
+}
+```
+
+Request:
+
+```json
+{
+  "$condition": {
+    "$eq": [
+      { "$field": "$smdesc#id" },
+      { "$strVal": "urn:smdesc:motor" }
+    ]
+  },
+  "$filters": [
+    {
+      "$fragment": "$smdesc#endpoints[]",
+      "$match": true,
+      "$condition": {
+        "$eq": [
+          { "$field": "$smdesc#endpoints[].interface" },
+          { "$strVal": "SUBMODEL-3.0" }
+        ]
+      }
+    },
+    {
+      "$fragment": "$smdesc#supplementalSemanticIds[]",
+      "$match": true,
+      "$condition": {
+        "$eq": [
+          { "$field": "$smdesc#supplementalSemanticIds[].keys[].value" },
+          { "$strVal": "PUBLIC" }
+        ]
+      }
+    }
+  ]
+}
+```
+
+Expected result:
+
+```json
+{
+  "paging_metadata": {},
+  "result": [
+    {
+      "id": "urn:smdesc:motor",
+      "endpoints": [
+        {
+          "interface": "SUBMODEL-3.0",
+          "protocolInformation": { "href": "https://public.example/motor" }
+        }
+      ],
+      "supplementalSemanticIds": [
+        {
+          "type": "ExternalReference",
+          "keys": [{ "type": "GlobalReference", "value": "PUBLIC" }]
+        }
+      ]
+    }
+  ]
+}
+```
+
+Result explanation:
+
+- Only endpoints with interface `SUBMODEL-3.0` remain.
+- Only supplemental semantic references containing `PUBLIC` remain.
+- Other descriptor fields are unchanged.
+- The two fragment conditions do not have to be satisfied by the same database
+  row because they target different fragments.
+
+## 6. Combine an ABAC filter with a request filter
+
+Assume a descriptor contains:
+
+```json
+{
+  "id": "urn:aasdesc:motor",
+  "specificAssetIds": [
+    { "name": "customerPartId", "value": "P-100" },
+    { "name": "customerPartId", "value": "P-200" },
+    { "name": "manufacturerAssetId", "value": "M-9" }
+  ]
+}
+```
+
+The relevant part of an allowing ABAC rule requires customer part IDs:
+
+```json
+{
+  "USEACL": "reader",
+  "USEOBJECTS": ["query_routes"],
+  "USEFORMULA": "always_true",
+  "FILTER": {
+    "FRAGMENT": "$aasdesc#specificAssetIds[]",
+    "MATCH": true,
+    "CONDITION": {
+      "$eq": [
+        { "$field": "$aasdesc#specificAssetIds[].name" },
+        { "$strVal": "customerPartId" }
+      ]
+    }
+  }
+}
+```
+
+The caller further narrows the same fragment:
+
+```json
+{
+  "$condition": { "$boolean": true },
+  "$filters": [
+    {
+      "$fragment": "$aasdesc#specificAssetIds[]",
+      "$match": true,
+      "$condition": {
+        "$eq": [
+          { "$field": "$aasdesc#specificAssetIds[].value" },
+          { "$strVal": "P-100" }
+        ]
+      }
+    }
+  ]
+}
+```
+
+Effective fragment condition:
+
+```text
+name = "customerPartId" AND value = "P-100"
+```
+
+Expected result:
+
+```json
+{
+  "paging_metadata": {},
+  "result": [
+    {
+      "id": "urn:aasdesc:motor",
+      "specificAssetIds": [
+        { "name": "customerPartId", "value": "P-100" }
+      ]
+    }
+  ]
+}
+```
+
+The request cannot expose `manufacturerAssetId`, because the ABAC filter is
+mandatory. It also cannot recover `P-200`, because the request itself narrowed
+the policy-visible rows to `P-100`.
+
+## 7. Query MultiLanguageProperty text and language
+
+`#value` on a `MultiLanguageProperty` matches its language string text. The
+condition holds when any language entry satisfies it, so the language does not
+need to be constrained.
+
+Starting Submodel:
+
+```json
+{
+  "id": "https://example.org/submodel/MultiLanguageTest",
+  "submodelElements": [
+    {
+      "idShort": "ProductName",
+      "modelType": "MultiLanguageProperty",
+      "value": [
+        { "language": "en", "text": "Industrial Sensor" },
+        { "language": "de", "text": "Industriesensor" },
+        { "language": "fr", "text": "Capteur industriel" }
+      ]
+    }
+  ]
+}
+```
+
+Request:
+
+```json
+{
+  "$condition": {
+    "$contains": [
+      { "$field": "$sme.ProductName#value" },
+      { "$strVal": "Capteur" }
+    ]
+  }
+}
+```
+
+Expected result:
+
+```json
+{
+  "paging_metadata": {},
+  "result": [
+    {
+      "id": "https://example.org/submodel/MultiLanguageTest",
+      "submodelElements": [
+        {
+          "idShort": "ProductName",
+          "modelType": "MultiLanguageProperty",
+          "value": [
+            { "language": "en", "text": "Industrial Sensor" },
+            { "language": "de", "text": "Industriesensor" },
+            { "language": "fr", "text": "Capteur industriel" }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+The French text matches even though the condition names no language. Adding a
+separate `#language` condition with `$and` only checks that the language exists;
+it does not require the matching text to belong to that language. For example,
+the text condition above combined with `#language = "en"` still matches this
+Submodel.
+
+To require the text and language to belong to the same language/text entry of
+the same `ProductName` MultiLanguageProperty, BaSyx supports combining the
+conditions with `$match`:
+
+```json
+{
+  "$condition": {
+    "$match": [
+      {
+        "$contains": [
+          { "$field": "$sme.ProductName#value" },
+          { "$strVal": "Capteur" }
+        ]
+      },
+      {
+        "$eq": [
+          { "$field": "$sme.ProductName#language" },
+          { "$strVal": "fr" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+This request returns the same Submodel shown above, including all three language
+entries. The `$condition` selects Submodels; it does not trim the returned
+MultiLanguageProperty to the matching language.
+
+Changing only `"fr"` to `"en"` in this `$match` request returns an empty result,
+because `"Capteur"` occurs only in the French text:
+
+```json
+{
+  "paging_metadata": {},
+  "result": []
+}
+```
+
+For the same example data, the following combinations show the difference
+between `$match` and `$and`. Each row combines `$contains` on
+`$sme.ProductName#value` with `$eq` on `$sme.ProductName#language`:
+
+| Text contains | Language equals | `$match` returns the Submodel | `$and` returns the Submodel |
+| --- | --- | --- | --- |
+| `Capteur` | `fr` | Yes | Yes |
+| `Capteur` | `en` | No | Yes |
+| `Industrial Sensor` | `en` | Yes | Yes |
+| `Industrial Sensor` | `fr` | No | Yes |
+
+This documents supported BaSyx behavior. The IDTA-01002 v3.2
+[Query Language specification, "Match of Elements in Lists"](https://industrialdigitaltwin.io/aas-specifications/IDTA-01002/v3.2/query-language.html)
+describes `$match` with an explicit `[]` list context. These MultiLanguageProperty
+fields expose no such context. Although the BNF accepts the expression, the
+semantics of this implicit language-entry list still need clarification upstream
+before this usage can be described as standards-compliant.
+
+## What can be combined
+
+- `$and`, `$or`, and `$not` can combine logical expressions.
+- Comparison operators such as `$eq`, `$ne`, `$gt`, `$ge`, `$lt`, and `$le`
+  compare fields and values.
+- String operators such as `$contains`, `$starts-with`, `$ends-with`, and
+  `$regex` can be used in conditions.
+- Multiple request filters can target the same fragment; they are combined with
+  `AND`.
+- Filters for different fragments are evaluated independently.
+- Multiple permitting ABAC rules form `OR` alternatives. A request query is
+  applied after those alternatives and cannot widen them.
+- Each individual predicate retains its own `$match` or `MATCH` mode when these
+  expressions are combined.
+
+For exact value types, casts, field identifier syntax, and fragment guards, see
+the [main query language guide](../developer/query_language/architecture.md).

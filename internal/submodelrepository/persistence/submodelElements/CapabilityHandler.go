@@ -1,0 +1,111 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+// Author: Jannik Fried ( Fraunhofer IESE )
+
+// Package submodelelements provides handlers for different types of submodel elements in the BaSyx framework.
+// This package contains PostgreSQL-based persistence implementations for various submodel element types
+// including capability elements for representing functional capabilities.
+package submodelelements
+
+import (
+	"database/sql"
+
+	"github.com/FriedJannik/aas-go-sdk/types"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+)
+
+// PostgreSQLCapabilityHandler provides PostgreSQL-based persistence operations for Capability submodel elements.
+// It implements CRUD operations for capability elements which represent functional capabilities or services
+// that can be provided by an asset or component within the Industrial Digital Twin context.
+type PostgreSQLCapabilityHandler struct {
+	db        *sql.DB
+	decorated *PostgreSQLSMECrudHandler
+}
+
+// NewPostgreSQLCapabilityHandler creates a new handler for Capability element persistence.
+// It initializes the handler with a database connection and sets up the decorated CRUD handler
+// for common submodel element operations.
+//
+// Parameters:
+//   - db: PostgreSQL database connection
+//
+// Returns:
+//   - *PostgreSQLCapabilityHandler: Configured handler instance
+//   - error: Error if handler initialization fails
+func NewPostgreSQLCapabilityHandler(db *sql.DB) (*PostgreSQLCapabilityHandler, error) {
+	decoratedHandler, err := NewPostgreSQLSMECrudHandler(db)
+	if err != nil {
+		return nil, err
+	}
+	return &PostgreSQLCapabilityHandler{db: db, decorated: decoratedHandler}, nil
+}
+
+// Update modifies an existing Capability element identified by its idShort or path.
+// This method delegates the update operation to the decorated CRUD handler which handles
+// the common submodel element update logic.
+//
+// Parameters:
+//   - idShortOrPath: idShort or hierarchical path to the element to update
+//   - submodelElement: Updated element data
+//
+// Returns:
+//   - error: Error if update fails
+func (p PostgreSQLCapabilityHandler) Update(submodelID string, idShortOrPath string, submodelElement types.ISubmodelElement, tx *sql.Tx, isPut bool) error {
+	return p.decorated.Update(submodelID, idShortOrPath, submodelElement, tx, isPut)
+}
+
+// Delete removes a Capability element identified by its idShort or path from the database.
+// This method delegates the deletion operation to the decorated CRUD handler which handles
+// the cascading deletion of all related data and child elements.
+//
+// Parameters:
+//   - idShortOrPath: idShort or hierarchical path to the element to delete
+//
+// Returns:
+//   - error: Error if deletion fails
+func (p PostgreSQLCapabilityHandler) Delete(idShortOrPath string) error {
+	return p.decorated.Delete(idShortOrPath)
+}
+
+// GetInsertQueryPart returns the type-specific insert query part for batch insertion of Capability elements.
+// Capability elements have no type-specific table, so this method returns nil.
+//
+// Parameters:
+//   - tx: Active database transaction (not used)
+//   - id: The database ID of the base submodel_element record (not used)
+//   - element: The Capability element to insert
+//
+// Returns:
+//   - *InsertQueryPart: Always nil as Capability has no type-specific table
+//   - error: An error if the element is not of type Capability
+func (p PostgreSQLCapabilityHandler) GetInsertQueryPart(_ *sql.Tx, _ int, element types.ISubmodelElement) (*InsertQueryPart, error) {
+	_, ok := element.(*types.Capability)
+	if !ok {
+		return nil, common.NewErrBadRequest("submodelElement is not of type Capability")
+	}
+
+	// Capability has no type-specific table
+	return nil, nil
+}

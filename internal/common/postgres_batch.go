@@ -1,0 +1,357 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
+package common
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+
+	"github.com/doug-martin/goqu/v9"
+	"github.com/doug-martin/goqu/v9/exp"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
+)
+
+const (
+	postgreSQLBatchMaxStatements = 1000
+	postgreSQLBatchMaxBytes      = 4 * 1024 * 1024
+	postgreSQLBatchSeparator     = ";\n"
+)
+
+// PostgreSQLBatchStatement is one rendered PostgreSQL statement and the values
+// that must be passed when executing it with pgx batch support.
+type PostgreSQLBatchStatement struct {
+	SQL  string
+	Args []any
+}
+
+// PostgreSQLBatch stores rendered statements in the order required by their
+// table dependencies.
+type PostgreSQLBatch struct {
+	statements []PostgreSQLBatchStatement
+}
+
+type sqlDataset interface {
+	ToSQL() (string, []interface{}, error)
+}
+
+// SupportsPostgreSQLBatch reports whether pgx batch execution is available.
+//
+// The function inspects the database handle's driver and returns true only for
+// the pgx stdlib driver.
+//
+// Parameters:
+//   - db: Database handle to inspect.
+//
+// Returns:
+//   - bool: True when pgx batch execution is supported.
+func SupportsPostgreSQLBatch(db *sql.DB) bool {
+	if db == nil {
+		return false
+	}
+	_, ok := db.Driver().(*stdlib.Driver)
+	return ok
+}
+
+// AppendDataset appends a rendered SQL dataset to the batch.
+//
+// The dataset is rendered immediately and stored in append order.
+//
+// Parameters:
+//   - dataset: SQL dataset to render and append.
+//
+// Returns:
+//   - error: Error when dataset rendering fails.
+func (b *PostgreSQLBatch) AppendDataset(dataset sqlDataset) error {
+	query, args, err := dataset.ToSQL()
+	if err != nil {
+		return err
+	}
+	b.statements = append(b.statements, PostgreSQLBatchStatement{SQL: query, Args: args})
+	return nil
+}
+
+// AppendStatement appends an already rendered SQL statement to the batch.
+func (b *PostgreSQLBatch) AppendStatement(query string, args ...any) {
+	b.statements = append(b.statements, PostgreSQLBatchStatement{SQL: query, Args: args})
+}
+
+// Statements returns the statements collected in append order.
+//
+// Returns:
+//   - []PostgreSQLBatchStatement: Rendered statements in dependency order.
+func (b *PostgreSQLBatch) Statements() []PostgreSQLBatchStatement {
+	return b.statements
+}
+
+// ExecutePostgreSQLBatchInTransaction executes rendered statements in a transaction.
+//
+// Statements must already be rendered to SQL and must not contain unresolved
+// Goqu arguments.
+//
+// Parameters:
+//   - ctx: Request context used for statement execution.
+//   - tx: Transaction used to execute the statements.
+//   - statements: Rendered PostgreSQL statements to execute in order.
+//
+// Returns:
+//   - error: Error when validation fails or PostgreSQL execution fails.
+func ExecutePostgreSQLBatchInTransaction(
+	ctx context.Context,
+	tx *sql.Tx,
+	statements []PostgreSQLBatchStatement,
+) error {
+	return executePostgreSQLBatchInTransaction(&ctx, tx, statements)
+}
+
+// ExecutePostgreSQLBatchInTransactionWithoutContext executes rendered
+// statements for legacy callers whose API does not carry a request context.
+func ExecutePostgreSQLBatchInTransactionWithoutContext(
+	tx *sql.Tx,
+	statements []PostgreSQLBatchStatement,
+) error {
+	return executePostgreSQLBatchInTransaction(nil, tx, statements)
+}
+
+func executePostgreSQLBatchInTransaction(
+	ctx *context.Context,
+	tx *sql.Tx,
+	statements []PostgreSQLBatchStatement,
+) error {
+	if tx == nil {
+		return NewErrBadRequest("COMMON-PGBATCH-NILTX transaction must not be nil")
+	}
+	if len(statements) == 0 {
+		return NewErrBadRequest("COMMON-PGBATCH-EMPTY no statements supplied")
+	}
+	for _, statement := range statements {
+		if len(statement.Args) != 0 {
+			return NewInternalServerError("COMMON-PGBATCH-PARAMS collected statement contains unresolved parameters")
+		}
+	}
+
+	for start := 0; start < len(statements); {
+		query, end := collectPostgreSQLBatchQuery(statements, start)
+		if err := executePostgreSQLBatchQuery(ctx, tx, query); err != nil {
+			return err
+		}
+		start = end
+	}
+	return nil
+}
+
+func collectPostgreSQLBatchQuery(statements []PostgreSQLBatchStatement, start int) (string, int) {
+	queries := make([]string, 0, postgreSQLBatchMaxStatements)
+	queryBytes := 0
+	end := start
+	for end < len(statements) && len(queries) < postgreSQLBatchMaxStatements {
+		statementBytes := len(statements[end].SQL)
+		if len(queries) != 0 {
+			statementBytes += len(postgreSQLBatchSeparator)
+		}
+		if len(queries) != 0 && queryBytes+statementBytes > postgreSQLBatchMaxBytes {
+			break
+		}
+		queries = append(queries, statements[end].SQL)
+		queryBytes += statementBytes
+		end++
+	}
+	return strings.Join(queries, postgreSQLBatchSeparator), end
+}
+
+func executePostgreSQLBatchQuery(ctx *context.Context, tx *sql.Tx, query string) error {
+	var err error
+	if ctx == nil {
+		_, err = tx.Exec(query)
+	} else {
+		_, err = tx.ExecContext(*ctx, query)
+	}
+	if err != nil {
+		return internalServerErrorWithCause("COMMON-PGBATCH-EXEC", err)
+	}
+	return nil
+}
+
+// PostgreSQLCurrentSequenceValue returns a Goqu expression for a sequence value.
+//
+// The expression resolves the current value of the table column sequence in the
+// current PostgreSQL session.
+//
+// Parameters:
+//   - table: Table that owns the sequence.
+//   - column: Column that owns the sequence.
+//
+// Returns:
+//   - exp.LiteralExpression: Goqu expression for currval(pg_get_serial_sequence(...)).
+func PostgreSQLCurrentSequenceValue(table string, column string) exp.LiteralExpression {
+	return goqu.L("currval(pg_get_serial_sequence(?, ?))", table, column)
+}
+
+// ExecutePostgreSQLBatchTransaction executes statements as one pgx batch.
+//
+// The function opens a dedicated connection, starts a pgx transaction, sends all
+// statements as one batch, consumes results, and commits on success.
+//
+// Parameters:
+//   - ctx: Request context used for connection and batch execution.
+//   - db: Database handle used to obtain the pgx connection.
+//   - statements: Rendered PostgreSQL statements to queue in order.
+//   - readResults: Optional callback that consumes queued batch results.
+//
+// Returns:
+//   - error: Error when connection setup, execution, result reading, or commit fails.
+func ExecutePostgreSQLBatchTransaction(
+	ctx context.Context,
+	db *sql.DB,
+	statements []PostgreSQLBatchStatement,
+	readResults func(pgx.BatchResults) error,
+) error {
+	if db == nil {
+		return NewErrBadRequest("COMMON-PGBATCH-NILDB database handle must not be nil")
+	}
+	if len(statements) == 0 {
+		return NewErrBadRequest("COMMON-PGBATCH-EMPTY no statements supplied")
+	}
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return NewInternalServerError("COMMON-PGBATCH-GETCONN " + err.Error())
+	}
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	return conn.Raw(func(driverConn any) error {
+		pgxConn, ok := driverConn.(*stdlib.Conn)
+		if !ok {
+			return fmt.Errorf("COMMON-PGBATCH-UNSUPPORTEDDRIVER expected pgx stdlib connection")
+		}
+
+		pgxTx, beginErr := pgxConn.Conn().Begin(ctx)
+		if beginErr != nil {
+			return internalServerErrorWithCause("COMMON-PGBATCH-BEGIN", beginErr)
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				_ = pgxTx.Rollback(ctx)
+			}
+		}()
+
+		batch := &pgx.Batch{}
+		for _, statement := range statements {
+			batch.Queue(statement.SQL, statement.Args...)
+		}
+
+		results := pgxTx.SendBatch(ctx, batch)
+		if readResults != nil {
+			if readErr := readResults(results); readErr != nil {
+				_ = results.Close()
+				return readErr
+			}
+		} else if execErr := executePostgreSQLBatchResults(results, len(statements)); execErr != nil {
+			return execErr
+		}
+		if closeErr := results.Close(); closeErr != nil {
+			return internalServerErrorWithCause("COMMON-PGBATCH-CLOSE", closeErr)
+		}
+		if commitErr := pgxTx.Commit(ctx); commitErr != nil {
+			return internalServerErrorWithCause("COMMON-PGBATCH-COMMIT", commitErr)
+		}
+		committed = true
+		return nil
+	})
+}
+
+// ExecutePostgreSQLReadTransaction runs a callback on the pgx connection
+// underlying a database/sql handle using one read-only repeatable-read
+// transaction. The callback owns result and batch-result consumption.
+func ExecutePostgreSQLReadTransaction(
+	ctx context.Context,
+	db *sql.DB,
+	read func(pgx.Tx) error,
+) error {
+	if db == nil {
+		return NewErrBadRequest("COMMON-PGREADTX-NILDB database handle must not be nil")
+	}
+	if read == nil {
+		return NewErrBadRequest("COMMON-PGREADTX-NILFN read callback must not be nil")
+	}
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return internalServerErrorWithCause("COMMON-PGREADTX-GETCONN", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	return conn.Raw(func(driverConn any) error {
+		stdlibConn, ok := driverConn.(*stdlib.Conn)
+		if !ok {
+			return NewInternalServerError("COMMON-PGREADTX-UNSUPPORTEDDRIVER expected pgx stdlib connection")
+		}
+		tx, beginErr := stdlibConn.Conn().BeginTx(ctx, pgx.TxOptions{
+			IsoLevel:   pgx.RepeatableRead,
+			AccessMode: pgx.ReadOnly,
+		})
+		if beginErr != nil {
+			return internalServerErrorWithCause("COMMON-PGREADTX-BEGIN", beginErr)
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback(ctx)
+			}
+		}()
+
+		if readErr := read(tx); readErr != nil {
+			return readErr
+		}
+		if contextErr := ctx.Err(); contextErr != nil {
+			return internalServerErrorWithCause("COMMON-PGREADTX-CONTEXT", contextErr)
+		}
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			return internalServerErrorWithCause("COMMON-PGREADTX-COMMIT", commitErr)
+		}
+		committed = true
+		return nil
+	})
+}
+
+func executePostgreSQLBatchResults(results pgx.BatchResults, count int) error {
+	for index := 0; index < count; index++ {
+		if _, execErr := results.Exec(); execErr != nil {
+			_ = results.Close()
+			return internalServerErrorWithCause("COMMON-PGBATCH-EXEC", execErr)
+		}
+	}
+	return nil
+}
+
+func internalServerErrorWithCause(code string, err error) error {
+	return fmt.Errorf("%s: %w", NewInternalServerError(code), err)
+}

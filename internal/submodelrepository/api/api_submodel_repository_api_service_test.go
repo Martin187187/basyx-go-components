@@ -1,0 +1,474 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
+package api
+
+import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/asyncjob"
+	gen "github.com/eclipse-basyx/basyx-go-components/internal/common/model"
+	persistencepostgresql "github.com/eclipse-basyx/basyx-go-components/internal/submodelrepository/persistence"
+	openapi "github.com/eclipse-basyx/basyx-go-components/pkg/submodelrepositoryapi"
+	"github.com/stretchr/testify/require"
+)
+
+func contextWithABACDisabled(t *testing.T) context.Context {
+	t.Helper()
+
+	cfg := &common.Config{}
+	var cfgCtx context.Context
+	handler := common.ConfigMiddleware(cfg)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		cfgCtx = r.Context()
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+
+	require.NotNil(t, cfgCtx)
+	return cfgCtx
+}
+
+func TestGetSubmodelElementByPathSubmodelRepoRejectsInvalidLevel(t *testing.T) {
+	t.Parallel()
+
+	sut := NewSubmodelRepositoryAPIAPIService(t.Context(), persistencepostgresql.SubmodelDatabase{})
+	encodedSubmodelID := base64.RawStdEncoding.EncodeToString([]byte("sm-1"))
+
+	response, err := sut.GetSubmodelElementByPathSubmodelRepo(contextWithABACDisabled(t), encodedSubmodelID, "a.b", "invalid-level", "")
+	require.NoError(t, err)
+	require.Equal(t, 400, response.Code)
+}
+
+func TestGetSubmodelByIDPathRejectsInvalidLevel(t *testing.T) {
+	t.Parallel()
+
+	sut := NewSubmodelRepositoryAPIAPIService(t.Context(), persistencepostgresql.SubmodelDatabase{})
+	encodedSubmodelID := common.EncodeString("sm-1")
+
+	response, err := sut.GetSubmodelByIDPath(contextWithABACDisabled(t), encodedSubmodelID, "invalid-level")
+	require.NoError(t, err)
+	require.Equal(t, 400, response.Code)
+}
+
+func TestInvokeOperationValueOnlyReturnsBadRequest(t *testing.T) {
+	t.Parallel()
+
+	sut := NewSubmodelRepositoryAPIAPIService(t.Context(), persistencepostgresql.SubmodelDatabase{})
+	response, err := sut.InvokeOperationValueOnly(contextWithABACDisabled(t), "", "", "", gen.OperationRequestValueOnly{}, false)
+	require.NoError(t, err)
+	require.Equal(t, 400, response.Code)
+}
+
+func TestInvokeOperationAsyncRequiresClientTimeoutDuration(t *testing.T) {
+	t.Parallel()
+
+	sut := NewSubmodelRepositoryAPIAPIService(t.Context(), persistencepostgresql.SubmodelDatabase{})
+	response, err := sut.InvokeOperationAsync(contextWithABACDisabled(t), "", "", gen.OperationRequest{})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, response.Code)
+}
+
+func TestOperationInvocationReadsDefinitionFromWriter(t *testing.T) {
+	tests := []struct {
+		name   string
+		invoke func(*SubmodelRepositoryAPIAPIService, context.Context) (gen.ImplResponse, error)
+	}{
+		{
+			name: "synchronous",
+			invoke: func(service *SubmodelRepositoryAPIAPIService, ctx context.Context) (gen.ImplResponse, error) {
+				return service.InvokeOperationSubmodelRepo(
+					ctx,
+					common.EncodeString("sm-1"),
+					"operation",
+					gen.OperationRequest{ClientTimeoutDuration: "PT1S"},
+					false,
+				)
+			},
+		},
+		{
+			name: "asynchronous",
+			invoke: func(service *SubmodelRepositoryAPIAPIService, ctx context.Context) (gen.ImplResponse, error) {
+				return service.InvokeOperationAsync(
+					ctx,
+					common.EncodeString("sm-1"),
+					"operation",
+					gen.OperationRequest{ClientTimeoutDuration: "PT1S"},
+				)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			writer, writerMock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer func() { _ = writer.Close() }()
+			reader, readerMock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer func() { _ = reader.Close() }()
+
+			backend, err := persistencepostgresql.NewSubmodelDatabaseFromPools(writer, reader, nil, "off")
+			require.NoError(t, err)
+			writerMock.ExpectBegin()
+			writerMock.ExpectQuery("SELECT").WillReturnError(errors.New("writer lookup failed"))
+			writerMock.ExpectRollback()
+
+			service := NewSubmodelRepositoryAPIAPIService(t.Context(), *backend)
+			response, invokeErr := test.invoke(service, contextWithABACDisabled(t))
+			require.NoError(t, invokeErr)
+			require.Equal(t, http.StatusInternalServerError, response.Code)
+			require.NoError(t, writerMock.ExpectationsWereMet())
+			require.NoError(t, readerMock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestAsyncDelegationCapacityIsBounded(t *testing.T) {
+	t.Parallel()
+
+	sut := NewSubmodelRepositoryAPIAPIService(t.Context(), persistencepostgresql.SubmodelDatabase{})
+	sut.asyncDelegationSlots = make(chan struct{}, 1)
+
+	require.True(t, sut.tryAcquireAsyncDelegationSlot())
+	require.False(t, sut.tryAcquireAsyncDelegationSlot())
+	sut.releaseAsyncDelegationSlot()
+	require.True(t, sut.tryAcquireAsyncDelegationSlot())
+	sut.releaseAsyncDelegationSlot()
+}
+
+func TestAsyncDelegationContextStopsWithServiceLifecycle(t *testing.T) {
+	t.Parallel()
+
+	lifecycleContext, stopService := context.WithCancel(t.Context())
+	sut := NewSubmodelRepositoryAPIAPIService(lifecycleContext, persistencepostgresql.SubmodelDatabase{})
+	delegationContext, cancelDelegation := sut.newAsyncDelegationContext(contextWithABACDisabled(t), time.Minute)
+	defer cancelDelegation()
+
+	stopService()
+
+	select {
+	case <-delegationContext.Done():
+		require.ErrorIs(t, delegationContext.Err(), context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("delegation context was not canceled with the service lifecycle")
+	}
+}
+
+func TestAsyncRecordExpiryStartsAtTerminalTransition(t *testing.T) {
+	t.Parallel()
+
+	retention := 5 * time.Minute
+	manager := asyncjob.NewManager("SMREPO-ASYNC-TEST", retention)
+	sut := NewSubmodelRepositoryAPIAPIService(t.Context(), persistencepostgresql.SubmodelDatabase{}, manager)
+	executionDeadline := time.Now().UTC().Add(10 * time.Minute)
+	handleID, err := sut.asyncJobManager.Start(t.Context(), "anonymous", asyncjob.StartOptions{
+		JobKind:           "test",
+		ExecutionDeadline: executionDeadline,
+	})
+	require.NoError(t, err)
+
+	runningRecord, found, err := sut.asyncJobManager.Get(t.Context(), handleID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.True(t, runningRecord.ExpiresAt.IsZero())
+	require.Equal(t, executionDeadline, runningRecord.ExecutionDeadline)
+
+	beforeTerminalUpdate := time.Now().UTC()
+	require.NoError(t, sut.asyncJobManager.CompletePayload(t.Context(), handleID, map[string]any{"success": true}))
+	terminalRecord, found, err := sut.asyncJobManager.Get(t.Context(), handleID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "Completed", terminalRecord.ExecutionState)
+	require.GreaterOrEqual(t, terminalRecord.ExpiresAt, beforeTerminalUpdate.Add(retention))
+}
+
+func TestPostSubmodelElementByPathSubmodelRepoMapsDeniedToForbidden(t *testing.T) {
+	t.Parallel()
+
+	response := newPostSubmodelElementByPathErrorResponse(
+		common.NewErrDenied("SMREPO-ADDSMEBYPATH-CHKDUP-ABACDENIED existing submodel element is not accessible under ABAC constraints"),
+	)
+
+	require.Equal(t, http.StatusForbidden, response.Code)
+}
+
+func TestGetOperationAsyncStatusReturnsRedirectWithLocation(t *testing.T) {
+	sut := NewSubmodelRepositoryAPIAPIService(t.Context(), persistencepostgresql.SubmodelDatabase{})
+
+	decodedSubmodelID := "sm-redirect"
+	encodedSubmodelID := base64.RawURLEncoding.EncodeToString([]byte(decodedSubmodelID))
+	handleID, err := sut.asyncJobManager.Start(t.Context(), "anonymous", asyncjob.StartOptions{
+		JobKind: "test",
+		Metadata: map[string]string{
+			delegatedAsyncSubmodelIdentifierMetadataKey: decodedSubmodelID,
+			delegatedAsyncIDShortPathMetadataKey:        "Ops.Add",
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, sut.asyncJobManager.CompletePayload(t.Context(), handleID, map[string]any{"success": true}))
+
+	response, err := sut.GetOperationAsyncStatus(contextWithABACDisabled(t), encodedSubmodelID, "Ops.Add", handleID)
+	require.NoError(t, err)
+	require.Equal(t, 302, response.Code)
+
+	redirect, ok := response.Body.(openapi.Redirect)
+	require.True(t, ok)
+	require.True(t, strings.Contains(redirect.Location, "/operation-results/"))
+}
+
+func TestAsyncOperationHandleSupportsFullAndValueOnlyResults(t *testing.T) {
+	t.Parallel()
+
+	sut := NewSubmodelRepositoryAPIAPIService(t.Context(), persistencepostgresql.SubmodelDatabase{})
+	decodedSubmodelID := "sm-result-representations"
+	encodedSubmodelID := common.EncodeString(decodedSubmodelID)
+	handleID, err := sut.asyncJobManager.Start(t.Context(), "anonymous", asyncjob.StartOptions{
+		JobKind: "test",
+		Metadata: map[string]string{
+			delegatedAsyncSubmodelIdentifierMetadataKey: decodedSubmodelID,
+			delegatedAsyncIDShortPathMetadataKey:        "Ops.Add",
+		},
+	})
+	require.NoError(t, err)
+	canonicalResult, err := toDelegatedOperationResultPayloadFromBody([]any{operationVariableJSON("sum", "8")})
+	require.NoError(t, err)
+	require.NoError(t, sut.asyncJobManager.CompletePayload(t.Context(), handleID, canonicalResult))
+
+	ctx := contextWithABACDisabled(t)
+	fullResult, err := sut.GetOperationAsyncResult(ctx, encodedSubmodelID, "Ops.Add", handleID)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, fullResult.Code)
+	fullBody := fullResult.Body.(map[string]any)
+	require.IsType(t, []any{}, fullBody["outputArguments"])
+
+	valueOnlyResult, err := sut.GetOperationAsyncResultValueOnly(ctx, encodedSubmodelID, "Ops.Add", handleID)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, valueOnlyResult.Code)
+	valueOnlyBody := valueOnlyResult.Body.(map[string]any)
+	require.Equal(t, "8", valueOnlyPropertyResult(t, valueOnlyBody, "outputArguments", "sum"))
+}
+
+func TestValueOnlyAsyncResultPreservesRunningFailureAndPathIsolation(t *testing.T) {
+	t.Parallel()
+
+	sut := NewSubmodelRepositoryAPIAPIService(t.Context(), persistencepostgresql.SubmodelDatabase{})
+	decodedSubmodelID := "sm-result-state"
+	encodedSubmodelID := common.EncodeString(decodedSubmodelID)
+	metadata := map[string]string{
+		delegatedAsyncSubmodelIdentifierMetadataKey: decodedSubmodelID,
+		delegatedAsyncIDShortPathMetadataKey:        "Ops.Add",
+	}
+	ctx := contextWithABACDisabled(t)
+
+	runningHandle, err := sut.asyncJobManager.Start(t.Context(), "anonymous", asyncjob.StartOptions{JobKind: "test", Metadata: metadata})
+	require.NoError(t, err)
+	runningResult, err := sut.GetOperationAsyncResultValueOnly(ctx, encodedSubmodelID, "Ops.Add", runningHandle)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, runningResult.Code)
+
+	isolatedResult, err := sut.GetOperationAsyncResultValueOnly(ctx, encodedSubmodelID, "Ops.Other", runningHandle)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, isolatedResult.Code)
+
+	failedHandle, err := sut.asyncJobManager.Start(t.Context(), "anonymous", asyncjob.StartOptions{JobKind: "test", Metadata: metadata})
+	require.NoError(t, err)
+	failure := newAPIErrorResponse(errors.New("delegate failed"), http.StatusBadGateway, "InvokeOperationAsync", "DelegateOperationCall")
+	storedFailure := newFailedOperationResult(gen.EXECUTIONSTATE_FAILED, errorResponseMessages(failure))
+	require.NoError(t, sut.asyncJobManager.Fail(t.Context(), failedHandle, failure.Code, storedFailure))
+	failedResult, err := sut.GetOperationAsyncResultValueOnly(ctx, encodedSubmodelID, "Ops.Add", failedHandle)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, failedResult.Code)
+	require.Equal(t, storedFailure, failedResult.Body)
+
+	clockNow := time.Now()
+	expiringManager, err := asyncjob.NewManagerWithClock("SMREPO-ASYNC-EXPIRED", time.Minute, func() time.Time { return clockNow })
+	require.NoError(t, err)
+	expiringService := NewSubmodelRepositoryAPIAPIService(t.Context(), persistencepostgresql.SubmodelDatabase{}, expiringManager)
+	expiredHandle, err := expiringManager.Start(t.Context(), "anonymous", asyncjob.StartOptions{JobKind: "test", Metadata: metadata})
+	require.NoError(t, err)
+	require.NoError(t, expiringManager.CompletePayload(t.Context(), expiredHandle, map[string]any{"success": true}))
+	clockNow = clockNow.Add(time.Minute)
+	expiredResult, err := expiringService.GetOperationAsyncResultValueOnly(ctx, encodedSubmodelID, "Ops.Add", expiredHandle)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, expiredResult.Code)
+}
+
+func TestDelegatedOperationErrorStatusReturnsBadGatewayResult(t *testing.T) {
+	delegationURL := startFailingDelegationServer(t, http.StatusBadRequest)
+
+	prepared := preparedOperationDelegation{delegationURL: delegationURL, timeout: time.Second}
+	response, err := invokePreparedOperation(contextWithABACDisabled(t), prepared, nil, "InvokeOperationSubmodelRepo")
+
+	require.NoError(t, err)
+	requireDelegatedStatusErrorResult(t, response, http.StatusBadRequest)
+}
+
+func TestAsyncDelegatedOperationErrorStatusReturnsFailedOperationResult(t *testing.T) {
+	delegationURL := startFailingDelegationServer(t, http.StatusInternalServerError)
+
+	result := executeAsyncDelegationAndGetResult(t, delegationURL, time.Second)
+
+	require.Equal(t, gen.EXECUTIONSTATE_FAILED, result.ExecutionState)
+	require.False(t, result.Success)
+	require.Len(t, result.Messages, 1)
+	require.Equal(t, "502", result.Messages[0].Code)
+	require.Contains(t, result.Messages[0].Text, fmt.Sprintf("HTTP %d", http.StatusInternalServerError))
+	require.NotContains(t, result.Messages[0].Text, "remoteDetail")
+}
+
+func TestAsyncDelegatedOperationClientTimeoutReturnsTimeoutOperationResult(t *testing.T) {
+	release := make(chan struct{})
+	delegationServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(delegationServer.Close)
+	t.Cleanup(func() { close(release) })
+	t.Setenv(delegationTrustedHostsKey, mustParseDelegationTestURL(t, delegationServer.URL).Host)
+
+	result := executeAsyncDelegationAndGetResult(t, delegationServer.URL, 50*time.Millisecond)
+
+	require.Equal(t, gen.EXECUTIONSTATE_TIMEOUT, result.ExecutionState)
+	require.False(t, result.Success)
+	require.Len(t, result.Messages, 1)
+	require.Contains(t, result.Messages[0].Text, "SMREPO-DOOPDELG-EXECREQ")
+}
+
+func executeAsyncDelegationAndGetResult(t *testing.T, delegationURL string, timeout time.Duration) failedOperationResult {
+	t.Helper()
+	sut := NewSubmodelRepositoryAPIAPIService(t.Context(), persistencepostgresql.SubmodelDatabase{})
+	decodedSubmodelID := "sm-delegated-failure"
+	handleID, err := sut.asyncJobManager.Start(t.Context(), "anonymous", asyncjob.StartOptions{
+		JobKind: "test",
+		Metadata: map[string]string{
+			delegatedAsyncSubmodelIdentifierMetadataKey: decodedSubmodelID,
+			delegatedAsyncIDShortPathMetadataKey:        "Ops.Add",
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, sut.tryAcquireAsyncDelegationSlot())
+
+	ctx := contextWithABACDisabled(t)
+	sut.executePreparedOperationAsync(ctx, handleID, delegationURL, nil, timeout, "InvokeOperationAsync")
+	response, err := sut.GetOperationAsyncResult(ctx, common.EncodeString(decodedSubmodelID), "Ops.Add", handleID)
+
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, response.Code)
+	result, ok := response.Body.(failedOperationResult)
+	require.True(t, ok, "expected OperationResult body, got %T", response.Body)
+	return result
+}
+
+func startFailingDelegationServer(t *testing.T, status int) string {
+	t.Helper()
+	delegationServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`[{"remoteDetail":"must not be forwarded"}]`))
+	}))
+	t.Cleanup(delegationServer.Close)
+	t.Setenv(delegationTrustedHostsKey, mustParseDelegationTestURL(t, delegationServer.URL).Host)
+	return delegationServer.URL
+}
+
+func requireDelegatedStatusErrorResult(t *testing.T, response gen.ImplResponse, delegatedStatus int) {
+	t.Helper()
+	require.Equal(t, http.StatusBadGateway, response.Code)
+	result, ok := response.Body.(gen.Result)
+	require.True(t, ok, "expected Result body, got %T", response.Body)
+	require.Len(t, result.Messages, 1)
+	require.Equal(t, "502", result.Messages[0].Code)
+	require.Contains(t, result.Messages[0].Text, fmt.Sprintf("HTTP %d", delegatedStatus))
+	require.NotContains(t, result.Messages[0].Text, "remoteDetail")
+}
+
+func TestMergeSubmodelElementPatchKeepsStoredOnlyFieldsOutOfUnrelatedPatches(t *testing.T) {
+	t.Parallel()
+	storedVariables := []any{map[string]any{"value": map[string]any{"modelType": "Property", "valueType": "xs:int"}}}
+	patchedVariables := []any{map[string]any{"value": map[string]any{"modelType": "Property", "idShort": "In", "valueType": "xs:int"}}}
+	description := []any{map[string]any{"language": "en", "text": "patched"}}
+	testCases := []struct {
+		name           string
+		base           map[string]any
+		patch          map[string]any
+		droppedFields  []string
+		expectedFields map[string]any
+	}{
+		{
+			name:           "operation variables are dropped when not patched",
+			base:           map[string]any{"modelType": "Operation", "idShort": "Op", "inputVariables": storedVariables, "outputVariables": storedVariables, "inoutputVariables": storedVariables},
+			patch:          map[string]any{"description": description},
+			droppedFields:  []string{"inputVariables", "outputVariables", "inoutputVariables"},
+			expectedFields: map[string]any{"description": description},
+		},
+		{
+			name:           "patched operation variables are kept",
+			base:           map[string]any{"modelType": "Operation", "idShort": "Op", "inputVariables": storedVariables, "outputVariables": storedVariables},
+			patch:          map[string]any{"inputVariables": patchedVariables},
+			droppedFields:  []string{"outputVariables"},
+			expectedFields: map[string]any{"inputVariables": patchedVariables},
+		},
+		{
+			name:          "collection children are dropped when not patched",
+			base:          map[string]any{"modelType": "SubmodelElementCollection", "idShort": "Coll", "value": storedVariables},
+			patch:         map[string]any{"description": description},
+			droppedFields: []string{"value"},
+		},
+		{
+			name:          "entity statements are dropped when not patched",
+			base:          map[string]any{"modelType": "Entity", "idShort": "Ent", "statements": storedVariables},
+			patch:         map[string]any{"description": description},
+			droppedFields: []string{"statements"},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			for _, merge := range []func(map[string]any, map[string]any) map[string]any{mergeSubmodelElementPatch, mergeSubmodelElementMetadataPatch} {
+				merged := merge(testCase.base, testCase.patch)
+				for _, field := range testCase.droppedFields {
+					require.NotContains(t, merged, field)
+				}
+				for field, value := range testCase.expectedFields {
+					require.Equal(t, value, merged[field])
+				}
+				require.Equal(t, testCase.base["idShort"], merged["idShort"])
+			}
+		})
+	}
+}

@@ -1,0 +1,61 @@
+{
+    "idShort": "A1",
+    "modelType": "SubmodelElementCollection",
+    "value": [
+        {
+            "idShort": "A2",
+            "modelType": "SubmodelElementCollection",
+            "value": [
+                {
+                    "idShort": "A3",
+                    "modelType": "SubmodelElementCollection",
+                    "value": [
+                        {
+                            "idShort": "A4",
+                            "modelType": "SubmodelElementCollection",
+                            "value": [
+                                {
+                                    "idShort": "A5",
+                                    "modelType": "SubmodelElementCollection",
+                                    "value": [
+                                        {
+                                            "idShort": "A6",
+                                            "modelType": "SubmodelElementList",                        
+                                            "typeValueListElement": "Property",
+                                            "value": [
+                                                {
+                                                    "idShort": "A1",
+                                                    "modelType": "Property",
+                                                    "valueType": "xs:string",
+                                                    "value": "1"
+                                                },
+                                                {
+                                                    "idShort": "A2",
+                                                    "modelType": "Property",
+                                                    "valueType": "xs:string",
+                                                    "value": "12"
+                                                },
+                                                {
+                                                    "idShort": "A3",
+                                                    "modelType": "Property",
+                                                    "valueType": "xs:string",
+                                                    "value": "123"
+                                                },
+                                                {
+                                                    "idShort": "A4",
+                                                    "modelType": "Property",
+                                                    "valueType": "xs:string",
+                                                    "value": "1234"
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

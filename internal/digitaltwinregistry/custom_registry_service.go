@@ -1,0 +1,540 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+*******************************************************************************/
+// Author: Martin Stemmer ( Fraunhofer IESE )
+
+package digitaltwinregistry
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"strings"
+	"time"
+
+	registryapiinternal "github.com/eclipse-basyx/basyx-go-components/internal/aasregistry/api"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/asyncjob"
+	descriptorsutil "github.com/eclipse-basyx/basyx-go-components/internal/common/descriptors"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model/grammar"
+	auth "github.com/eclipse-basyx/basyx-go-components/internal/common/security"
+	discoveryapiinternal "github.com/eclipse-basyx/basyx-go-components/internal/discoveryservice/api"
+)
+
+const customRegistryComponentName = "DTRREG"
+
+// CustomRegistryService wraps the default registry service to allow custom logic.
+type CustomRegistryService struct {
+	*registryapiinternal.AssetAdministrationShellRegistryAPIAPIService
+	discovery *discoveryapiinternal.AssetAdministrationShellBasicDiscoveryAPIAPIService
+}
+
+// NewCustomRegistryService constructs a custom registry service wrapper.
+func NewCustomRegistryService(
+	base *registryapiinternal.AssetAdministrationShellRegistryAPIAPIService,
+	discovery *discoveryapiinternal.AssetAdministrationShellBasicDiscoveryAPIAPIService,
+) *CustomRegistryService {
+	return &CustomRegistryService{
+		AssetAdministrationShellRegistryAPIAPIService: base,
+		discovery: discovery,
+	}
+}
+
+// GetAllAssetAdministrationShellDescriptors - Returns all Asset Administration Shell Descriptors
+func (s *CustomRegistryService) GetAllAssetAdministrationShellDescriptors(
+	ctx context.Context,
+	limit int32,
+	cursor string,
+	assetKind model.AssetKind,
+	assetType string,
+	assetIds []string,
+	createdFrom time.Time,
+	updatedFrom time.Time,
+) (model.ImplResponse, error) {
+	if detail, paginationErr := common.ValidateAPIPagination(limit, cursor); paginationErr != nil {
+		return common.NewErrorResponse(paginationErr, http.StatusBadRequest, "DIGITALTWINREGISTRY", "GetAllAssetAdministrationShellDescriptors", detail), nil
+	}
+
+	createdAfter, _ := CreatedAfterFromContext(ctx)
+	if createdAfter != nil {
+		query := buildEdcBpnClaimEqualsHeaderExpression(createdAfter, "$aasdesc#createdAt")
+		var queryErr error
+		ctx, queryErr = auth.WithAuthorizedQuery(ctx, auth.SemanticResourceAASDesc, query)
+		if queryErr != nil {
+			return common.NewErrorResponse(queryErr, http.StatusInternalServerError, customRegistryComponentName, "GetAllAssetAdministrationShellDescriptors", "BuildAuthorizedQuery"), queryErr
+		}
+	}
+	ctx = descriptorsutil.WithIncludeAASDescriptorCreatedAt(ctx)
+
+	if len(assetIds) > 0 {
+		links, resp, err := decodeRegistryAssetLinkQueryAssetIDs(assetIds)
+		if resp != nil || err != nil {
+			return *resp, err
+		}
+		if len(links) == 0 {
+			return emptyDescriptorPage(), nil
+		}
+
+		return s.getAllAssetAdministrationShellDescriptorsByAssetLinks(
+			ctx,
+			limit,
+			cursor,
+			assetKind,
+			assetType,
+			links,
+			createdFrom,
+			updatedFrom,
+		)
+	}
+
+	return s.AssetAdministrationShellRegistryAPIAPIService.GetAllAssetAdministrationShellDescriptors(
+		ctx,
+		limit,
+		cursor,
+		assetKind,
+		assetType,
+		assetIds,
+		createdFrom,
+		updatedFrom,
+	)
+}
+
+// GetAssetAdministrationShellDescriptorById - Returns a specific Asset Administration Shell Descriptor
+// nolint:revive // defined by standard
+func (s *CustomRegistryService) GetAssetAdministrationShellDescriptorById(
+	ctx context.Context,
+	aasIdentifier string,
+) (model.ImplResponse, error) {
+	ctx = descriptorsutil.WithIncludeAASDescriptorCreatedAt(ctx)
+	return s.AssetAdministrationShellRegistryAPIAPIService.GetAssetAdministrationShellDescriptorById(ctx, aasIdentifier)
+}
+
+func (s *CustomRegistryService) getAllAssetAdministrationShellDescriptorsByAssetLinks(
+	ctx context.Context,
+	limit int32,
+	cursor string,
+	assetKind model.AssetKind,
+	assetType string,
+	links []model.AssetLink,
+	createdFrom time.Time,
+	updatedFrom time.Time,
+) (model.ImplResponse, error) {
+	if detail, paginationErr := common.ValidateAPIPagination(limit, cursor); paginationErr != nil {
+		return common.NewErrorResponse(paginationErr, http.StatusBadRequest, "DIGITALTWINREGISTRY", "getAllAssetAdministrationShellDescriptorsByAssetLinks", detail), nil
+	}
+
+	if len(links) == 0 {
+		return emptyDescriptorPage(), nil
+	}
+
+	lookupCtx, lookupErr := mergeAssetLinkLookupFilter(ctx, links)
+	if lookupErr != nil {
+		return common.NewErrorResponse(
+			lookupErr,
+			http.StatusInternalServerError,
+			customRegistryComponentName,
+			"GetAllAssetAdministrationShellDescriptors",
+			"AssetLinkFilter",
+		), lookupErr
+	}
+
+	lookupResp, lookupErr := s.discovery.SearchAllAssetAdministrationShellIdsByAssetLink(lookupCtx, limit, cursor, links)
+	if lookupErr != nil || lookupResp.Code != http.StatusOK {
+		return lookupResp, lookupErr
+	}
+
+	aasIDs, paging, extractErr := extractLookupAASIDs(lookupResp)
+	if extractErr != nil {
+		return common.NewErrorResponse(
+			extractErr,
+			http.StatusInternalServerError,
+			customRegistryComponentName,
+			"GetAllAssetAdministrationShellDescriptors",
+			"LookupResponse",
+		), extractErr
+	}
+	if len(aasIDs) == 0 {
+		return model.Response(http.StatusOK, map[string]any{
+			"paging_metadata": paging,
+			"result":          []map[string]any{},
+		}), nil
+	}
+	descriptorQuery := buildAASIDQuery(aasIDs)
+	descriptorCtx, descriptorContextErr := auth.WithAuthorizedQuery(ctx, auth.SemanticResourceAASDesc, descriptorQuery)
+	if descriptorContextErr != nil {
+		return common.NewErrorResponse(descriptorContextErr, http.StatusInternalServerError, customRegistryComponentName, "GetAllAssetAdministrationShellDescriptors", "BuildDescriptorQuery"), descriptorContextErr
+	}
+	descriptorResp, descriptorErr := s.AssetAdministrationShellRegistryAPIAPIService.GetAllAssetAdministrationShellDescriptors(
+		descriptorCtx,
+		limit,
+		"",
+		assetKind,
+		assetType,
+		nil,
+		createdFrom,
+		updatedFrom,
+	)
+	if descriptorErr != nil || descriptorResp.Code != http.StatusOK {
+		return descriptorResp, descriptorErr
+	}
+
+	return replaceDescriptorPagingMetadata(descriptorResp, paging)
+}
+
+func decodeRegistryAssetLinkQueryAssetIDs(encodedAssetIDs []string) ([]model.AssetLink, *model.ImplResponse, error) {
+	normalizedAssetIDs := encodedAssetIDs
+	links := make([]model.AssetLink, 0, len(normalizedAssetIDs))
+	for _, encodedAssetID := range normalizedAssetIDs {
+		link, resp := decodeRegistryAssetLinkQueryAssetID(encodedAssetID)
+		if resp != nil {
+			return nil, resp, nil
+		}
+		links = append(links, link)
+	}
+
+	return links, nil, nil
+}
+
+func decodeRegistryAssetLinkQueryAssetID(encodedAssetID string) (model.AssetLink, *model.ImplResponse) {
+	assetID, err := common.DecodeAPISpecificAssetID(encodedAssetID)
+	if err != nil {
+		resp := common.NewErrorResponse(err, http.StatusBadRequest, customRegistryComponentName, "GetAllAssetAdministrationShellDescriptors", "BadRequest-DecodeAssetIds")
+		return model.AssetLink{}, &resp
+	}
+	return model.AssetLink{Name: assetID.Name(), Value: assetID.Value()}, nil
+}
+
+func splitGlobalAssetIDLinks(links []model.AssetLink) ([]string, []model.AssetLink) {
+	globalAssetIDs := make([]string, 0, len(links))
+	assetLinks := make([]model.AssetLink, 0, len(links))
+	for _, link := range links {
+		if link.Name == common.GlobalAssetIDAssetLinkName {
+			globalAssetIDs = append(globalAssetIDs, link.Value)
+			continue
+		}
+		assetLinks = append(assetLinks, link)
+	}
+	return globalAssetIDs, assetLinks
+}
+
+func buildBasicDiscoveryGlobalAssetIDQuery(globalAssetIDs []string) grammar.Query {
+	return buildGlobalAssetIDQueryForField("$bd#globalAssetId", globalAssetIDs)
+}
+
+func buildBasicDiscoveryGlobalAssetIDDescriptorVisibilityQuery(ctx context.Context) grammar.Query {
+	condition := visibleNonGlobalAssetLinkExpressionForRoot(ctx, "$bd")
+	return grammar.Query{Condition: &condition}
+}
+
+func visibleNonGlobalAssetLinkExpressionForRoot(ctx context.Context, root string) grammar.LogicalExpression {
+	expressions := []grammar.LogicalExpression{}
+	if edcBpn, ok := edcBpnClaimFromContext(ctx); ok {
+		expressions = append(expressions, visibleNonGlobalAssetLinkForSubject(root, edcBpn))
+	}
+	expressions = append(expressions, visibleNonGlobalAssetLinkForSubject(root, "PUBLIC_READABLE"))
+
+	if len(expressions) == 1 {
+		return expressions[0]
+	}
+	return grammar.LogicalExpression{Or: expressions}
+}
+
+func visibleNonGlobalAssetLinkForSubject(root string, subject string) grammar.LogicalExpression {
+	nameField := grammar.ModelStringPattern(root + "#specificAssetIds[].name")
+	subjectField := grammar.ModelStringPattern(root + "#specificAssetIds[].externalSubjectId.keys[].value")
+	globalAssetIDName := grammar.StandardString(common.GlobalAssetIDAssetLinkName)
+	subjectValue := grammar.StandardString(subject)
+
+	return grammar.LogicalExpression{
+		Match: []grammar.MatchExpression{
+			{
+				Ne: grammar.ComparisonItems{
+					{Field: &nameField},
+					{StrVal: &globalAssetIDName},
+				},
+			},
+			{
+				Eq: grammar.ComparisonItems{
+					{Field: &subjectField},
+					{StrVal: &subjectValue},
+				},
+			},
+		},
+	}
+}
+
+func buildGlobalAssetIDQueryForField(field string, globalAssetIDs []string) grammar.Query {
+	if len(globalAssetIDs) == 0 {
+		return grammar.Query{}
+	}
+
+	globalAssetIDField := grammar.ModelStringPattern(field)
+	condition := grammar.LogicalExpression{And: make([]grammar.LogicalExpression, 0, len(globalAssetIDs))}
+	for _, globalAssetID := range globalAssetIDs {
+		globalAssetIDValue := grammar.StandardString(globalAssetID)
+		condition.And = append(condition.And, grammar.LogicalExpression{
+			Eq: grammar.ComparisonItems{
+				{Field: &globalAssetIDField},
+				{StrVal: &globalAssetIDValue},
+			},
+		})
+	}
+
+	return grammar.Query{Condition: &condition}
+}
+
+func mergeAssetLinkLookupFilter(ctx context.Context, links []model.AssetLink) (context.Context, error) {
+	shouldEnforceFormula, enforceErr := auth.ShouldEnforceFormula(ctx)
+	if enforceErr != nil {
+		return ctx, enforceErr
+	}
+
+	globalAssetIDs, specificAssetLinks := splitGlobalAssetIDLinks(links)
+	readUnrestricted := auth.HasUnrestrictedFormulaForRight(ctx, grammar.RightsEnumREAD)
+	if globalAssetIDDescriptorVisibilityRequired(ctx, globalAssetIDs, readUnrestricted) {
+		ctx, enforceErr = auth.WithAuthorizedQuery(ctx, auth.SemanticResourceBD, buildBasicDiscoveryGlobalAssetIDDescriptorVisibilityQuery(ctx))
+		if enforceErr != nil {
+			return ctx, enforceErr
+		}
+	}
+
+	if !shouldEnforceFormula {
+		return ctx, nil
+	}
+
+	assetLinkQuery := buildBasicDiscoveryAssetLinkQueryWithAccess(ctx, specificAssetLinks, readUnrestricted)
+	if assetLinkQuery.Condition == nil && len(assetLinkQuery.FilterConditions) == 0 {
+		return ctx, nil
+	}
+	ctx, enforceErr = auth.WithAuthorizedQuery(ctx, auth.SemanticResourceBD, assetLinkQuery)
+	if enforceErr != nil {
+		return ctx, enforceErr
+	}
+	if len(globalAssetIDs) > 0 {
+		return ctx, nil
+	}
+
+	return discoveryapiinternal.WithAssetLinksAlreadyConstrained(ctx), nil
+}
+
+func globalAssetIDDescriptorVisibilityRequired(ctx context.Context, globalAssetIDs []string, readUnrestricted bool) bool {
+	if len(globalAssetIDs) == 0 || readUnrestricted {
+		return false
+	}
+
+	cfg, ok := common.ConfigFromContext(ctx)
+	return ok && cfg.ABAC.Enabled
+}
+
+func edcBpnClaimFromContext(ctx context.Context) (string, bool) {
+	claims := auth.ClaimsFromContext(ctx)
+	edcBpn, ok := claims.GetString("Edc-Bpn")
+	edcBpn = strings.TrimSpace(edcBpn)
+	return edcBpn, ok && edcBpn != ""
+}
+
+func buildAASIDQuery(aasIDs []string) grammar.Query {
+	if len(aasIDs) == 0 {
+		return grammar.Query{}
+	}
+
+	aasIDField := grammar.ModelStringPattern("$aasdesc#id")
+	condition := grammar.LogicalExpression{Or: make([]grammar.LogicalExpression, 0, len(aasIDs))}
+	for _, aasID := range aasIDs {
+		aasIDValue := grammar.StandardString(aasID)
+		condition.Or = append(condition.Or, grammar.LogicalExpression{
+			Eq: grammar.ComparisonItems{
+				{Field: &aasIDField},
+				{StrVal: &aasIDValue},
+			},
+		})
+	}
+
+	return grammar.Query{Condition: &condition}
+}
+
+func extractLookupAASIDs(resp model.ImplResponse) ([]string, model.PagedResultPagingMetadata, error) {
+	switch body := resp.Body.(type) {
+	case model.GetAllAssetAdministrationShellIdsByAssetLink200Response:
+		return body.Result, body.PagingMetadata, nil
+	case *model.GetAllAssetAdministrationShellIdsByAssetLink200Response:
+		if body == nil {
+			return nil, model.PagedResultPagingMetadata{}, nil
+		}
+		return body.Result, body.PagingMetadata, nil
+	default:
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return nil, model.PagedResultPagingMetadata{}, err
+		}
+		var decoded model.GetAllAssetAdministrationShellIdsByAssetLink200Response
+		if err = json.Unmarshal(payload, &decoded); err != nil {
+			return nil, model.PagedResultPagingMetadata{}, err
+		}
+		return decoded.Result, decoded.PagingMetadata, nil
+	}
+}
+
+func replaceDescriptorPagingMetadata(resp model.ImplResponse, paging model.PagedResultPagingMetadata) (model.ImplResponse, error) {
+	payload, err := json.Marshal(resp.Body)
+	if err != nil {
+		return model.ImplResponse{}, err
+	}
+	var decoded struct {
+		PagingMetadata model.PagedResultPagingMetadata `json:"paging_metadata"`
+		Result         []map[string]any                `json:"result"`
+	}
+	if err = json.Unmarshal(payload, &decoded); err != nil {
+		return model.ImplResponse{}, err
+	}
+	return model.Response(http.StatusOK, map[string]any{
+		"paging_metadata": paging,
+		"result":          decoded.Result,
+	}), nil
+}
+
+func emptyDescriptorPage() model.ImplResponse {
+	return model.Response(http.StatusOK, map[string]any{
+		"paging_metadata": model.PagedResultPagingMetadata{},
+		"result":          []map[string]any{},
+	})
+}
+
+// PostAssetAdministrationShellDescriptor executes default POST behavior.
+func (s *CustomRegistryService) PostAssetAdministrationShellDescriptor(
+	ctx context.Context,
+	assetAdministrationShellDescriptor model.AssetAdministrationShellDescriptor,
+) (model.ImplResponse, error) {
+	ctx = withDTRDescriptorWriteContext(ctx)
+
+	baseResp, baseErr := s.AssetAdministrationShellRegistryAPIAPIService.PostAssetAdministrationShellDescriptor(
+		ctx,
+		assetAdministrationShellDescriptor,
+	)
+	if baseErr != nil || !is2xx(baseResp.Code) {
+		return baseResp, baseErr
+	}
+
+	return baseResp, nil
+}
+
+// PutAssetAdministrationShellDescriptorById executes default PUT behavior.
+func (s *CustomRegistryService) PutAssetAdministrationShellDescriptorById(
+	ctx context.Context,
+	aasIdentifier string,
+	assetAdministrationShellDescriptor model.AssetAdministrationShellDescriptor,
+) (model.ImplResponse, error) {
+	ctx = withDTRDescriptorWriteContext(ctx)
+
+	decodedAASID, decodeErr := common.DecodeAPIIdentifier(aasIdentifier)
+	if decodeErr != nil {
+		resp := common.NewErrorResponse(
+			decodeErr,
+			http.StatusBadRequest,
+			customRegistryComponentName,
+			"PutAssetAdministrationShellDescriptorById",
+			"BadRequest-DecodeAAS",
+		)
+		return resp, nil
+	}
+	// DTR customization: path id wins, so base strict-check remains bypassed only here.
+	assetAdministrationShellDescriptor.Id = decodedAASID
+
+	baseResp, baseErr := s.AssetAdministrationShellRegistryAPIAPIService.PutAssetAdministrationShellDescriptorById(
+		ctx,
+		aasIdentifier,
+		assetAdministrationShellDescriptor,
+	)
+	if baseErr != nil || !is2xx(baseResp.Code) {
+		return baseResp, baseErr
+	}
+
+	return baseResp, nil
+}
+
+// PutSubmodelDescriptorByIdThroughSuperpath executes default PUT behavior for
+// submodel descriptors while deactivating strict body-id/path-id mismatch only
+// for Digital Twin Registry.
+//
+// Payload compatibility note:
+//   - Default field is plural "supplementalSemanticIds".
+//   - Singular "supplementalSemanticId" support is controlled via config key
+//     general.supportsSingularSupplementalSemanticId
+//     (env: GENERAL_SUPPORTSSINGULARSUPPLEMENTALSEMANTICID).
+func (s *CustomRegistryService) PutSubmodelDescriptorByIdThroughSuperpath(
+	ctx context.Context,
+	aasIdentifier string,
+	submodelIdentifier string,
+	submodelDescriptor model.SubmodelDescriptor,
+) (model.ImplResponse, error) {
+	decodedSMD, decodeErr := common.DecodeAPIIdentifier(submodelIdentifier)
+	if decodeErr != nil {
+		resp := common.NewErrorResponse(
+			decodeErr,
+			http.StatusBadRequest,
+			customRegistryComponentName,
+			"PutSubmodelDescriptorByIdThroughSuperpath",
+			"BadRequest-DecodeSubmodel",
+		)
+		return resp, nil
+	}
+	// DTR customization: path id wins, so base strict-check remains bypassed only here.
+	submodelDescriptor.Id = decodedSMD
+
+	return s.AssetAdministrationShellRegistryAPIAPIService.PutSubmodelDescriptorByIdThroughSuperpath(
+		ctx,
+		aasIdentifier,
+		submodelIdentifier,
+		submodelDescriptor,
+	)
+}
+
+// ExecuteBulkCreateAtomic executes atomic bulk create with DTR-specific context flags.
+func (s *CustomRegistryService) ExecuteBulkCreateAtomic(
+	ctx context.Context,
+	descriptors []model.AssetAdministrationShellDescriptor,
+) asyncjob.BulkResult {
+	ctx = withDTRDescriptorWriteContext(ctx)
+	return s.AssetAdministrationShellRegistryAPIAPIService.ExecuteBulkCreateAtomic(ctx, descriptors)
+}
+
+// ExecuteBulkPutAtomic executes atomic bulk put with DTR-specific context flags.
+func (s *CustomRegistryService) ExecuteBulkPutAtomic(
+	ctx context.Context,
+	descriptors []model.AssetAdministrationShellDescriptor,
+) asyncjob.BulkResult {
+	ctx = withDTRDescriptorWriteContext(ctx)
+	return s.AssetAdministrationShellRegistryAPIAPIService.ExecuteBulkPutAtomic(ctx, descriptors)
+}
+
+func withDTRDescriptorWriteContext(ctx context.Context) context.Context {
+	ctx = descriptorsutil.WithAllowAASDescriptorCreatedAtOverride(ctx)
+	ctx = descriptorsutil.WithIncludeAASDescriptorCreatedAt(ctx)
+	return descriptorsutil.WithPublicReadableGlobalAssetIDExternalSubjectID(ctx)
+}
+
+func is2xx(code int) bool {
+	return code >= http.StatusOK && code < http.StatusMultipleChoices
+}

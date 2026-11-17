@@ -1,13 +1,453 @@
+![AAS Metamodel](https://img.shields.io/badge/AAS%20metamodel-v3.2-blue)
+![AAS API](https://img.shields.io/badge/AAS%20API-v3.2-blue)
+![AAS Security](https://img.shields.io/badge/AAS%20security-v3.1-blue)
+[![Go Application Tests](https://github.com/eclipse-basyx/basyx-go-components/actions/workflows/go-tests.yml/badge.svg?branch=main)](https://github.com/eclipse-basyx/basyx-go-components/actions/workflows/go-tests.yml?query=branch%3Amain)
+![Docker Pulls](https://img.shields.io/endpoint?url=https%3A%2F%2Fdocker-stats.basyx.org%2Fgo.json)
+
+<div align="center">
+  <img src="docu/assets/Logo_Go_light.svg" alt="BaSyx Go Logo" width="400"/>
+</div>
+
 # BaSyx Go Components
 
-Welcome to the repo of the BaSyx Go Components
+Welcome to the BaSyx Go project! This guide is designed to help new developers onboard quickly, understand the architecture, and contribute effectively.
 
-## Developing BaSyx Go Components
+See the [changelog](CHANGELOG.md) for release changes and upgrade considerations.
 
-We provide launch scripts for the different services. They are configured in the `.vscode/launch.json` file. You can run and debug the services directly from VSCode using the `Run and Debug` view.
+> [!NOTE]
+> We also provide a wiki at https://wiki.basyx.org with a extensive user and developer documentation.
 
-Alternatively you can run the services from the command line. For example, to run the Submodel Repository Service, use the following command:
+## Table of Contents
 
-```bash
-go run ./cmd/submodelrepositoryservice/main.go -config ./cmd/submodelrepositoryservice/config.yaml -databaseSchema ./basyxschema.sql
+- [BaSyx Go Components](#basyx-go-components)
+  - [Changelog](CHANGELOG.md)
+  - [Table of Contents](#table-of-contents)
+  - [1. Project Overview](#1-project-overview)
+  - [2. Architecture Overview](#2-architecture-overview)
+  - [3. Setup \& Installation](#3-setup--installation)
+    - [Prerequisites](#prerequisites)
+    - [Steps](#steps)
+  - [4. Environment Variables \& Configuration](#4-environment-variables--configuration)
+    - [Database Initialization](#database-initialization)
+    - [Logging](#logging)
+    - [OpenTelemetry Tracing](#opentelemetry-tracing)
+  - [5. Code Style \& Conventions](#5-code-style--conventions)
+  - [6. Module Structure](#6-module-structure)
+  - [7. Common Workflows](#7-common-workflows)
+    - [Build \& Run](#build--run)
+    - [Test](#test)
+    - [Lint](#lint)
+  - [8. API Usage](#8-api-usage)
+  - [9. Contribution Guidelines](#9-contribution-guidelines)
+  - [10. Repository Automation](#10-repository-automation)
+    - [Create a Release](#create-a-release)
+  - [11. Security \& Supply Chain Verification](#11-security--supply-chain-verification)
+  - [12. Troubleshooting \& Error Reference](#12-troubleshooting--error-reference)
+  - [13. Glossary of Terms \& Abbreviations](#13-glossary-of-terms--abbreviations)
+  - [Database Schema](#database-schema)
+  - [Frequently Asked Questions](#frequently-asked-questions)
+  - [Further Reading](#further-reading)
+
+---
+
+## 1. Project Overview
+
+BaSyx Go Components is an open-source implementation of the Eclipse BaSyx framework in Go, providing Asset Administration Shell (AAS) API components like registries, repositories, and more. The project is modular, scalable, and designed for industrial digital twin scenarios.
+
+## 2. Architecture Overview
+
+The project is composed of DB-backed microservices for AAS and Submodel registries, AAS and Submodel repositories, AAS Environment, Discovery, Digital Twin Registry, AASX file server, Concept Description Repository, Company Lookup, and DPP API. The BaSyx Configuration Service initializes and migrates the PostgreSQL schema, and `historyevidenceverifier` supports operational history-evidence checks. Security is enforced via OIDC and ABAC middleware. See [docu/developer/security_architecture.md](docu/developer/security_architecture.md) for a detailed flow and architecture diagram.
+
+## 3. Setup & Installation
+
+### Prerequisites
+
+- Go >= 1.27.4
+- Docker & Docker Compose
+- PostgreSQL 16 or newer (for local development)
+
+### Steps
+
+1. Clone the repository:
+     ```sh
+     git clone https://github.com/eclipse-basyx/basyx-go-components.git
+     cd basyx-go-components
+     ```
+2. Install dependencies:
+     ```sh
+     go mod tidy
+     ```
+3. Start services (example):
+     ```sh
+     go run ./cmd/basyxconfigurationservice/main.go -config ./cmd/basyxconfigurationservice/config.yaml -databaseSchema ./database/base.sql -customPatchPath ./database/patches
+     go run ./cmd/submodelrepositoryservice/main.go -config ./cmd/submodelrepositoryservice/config.yaml
+     ```
+4. Run integration tests:
+     ```sh
+     go test -v ./internal/submodelrepository/integration_tests
+     ```
+5. Use Docker Compose for multi-service setup:
+     ```sh
+     docker compose -f examples/BaSyxMinimalExample/docker-compose.yml up
+     ```
+   To run BaSyx with distinct PostgreSQL writer and streaming-standby reader
+   endpoints, see the [PostgreSQL read replica
+   example](examples/BaSyxReadReplicaExample/README.md).
+   To edit sample Submodels and see their changes in a CloudEvents feed, try
+   the [Event Feed example](examples/BaSyxEventFeedExample/README.md).
+
+## 4. Environment Variables & Configuration
+
+### Database Initialization
+
+DB-backed BaSyx services expect the shared PostgreSQL schema to be initialized before startup. Run `basyxconfigurationservice` once against the target database before starting repository, registry, discovery, or environment services. The configuration service loads `database/base.sql`, applies versioned patches from `database/patches`, and records the schema version and schema state in `basyxsystem`. Runtime services validate that the schema state is `clean` and that the version matches during startup; they fail fast if the configuration service has not completed successfully. If a schema patch fails during execution, the database is marked `dirty` until the configuration service completes a compatible patch run successfully.
+
+For operator-facing setup guidance, see the [BaSyx wiki](https://wiki.basyx.org)
+
+The `basyxconfigurationservice` image should use the same BaSyx version or build revision as the DB-backed runtime components in the same setup. This is especially important when using mutable image tags. The `latest` tag tracks the newest release, and the `SNAPSHOT` tag tracks the current main-branch snapshot; both tags may point to different image digests over time. For reproducible deployments, pin a concrete version tag, commit/SNAPSHOT tag, or image digest instead.
+
+If a setup uses mutable tags and pulls images on every start or restart, include `basyxconfigurationservice` in the deployment and run it before the DB-backed components. Otherwise a freshly pulled runtime component may expect a newer schema version than the database currently contains, causing startup validation to fail.
+
+### Logging
+
+All commands support `logging.format` (`text` or `json`) and `logging.level`
+(`debug`, `info`, `warn`, or `error`), with `LOGGING_FORMAT` and
+`LOGGING_LEVEL` environment overrides. Diagnostic records are written to
+stderr. See the [logging guide](docu/admin/logging.md) for the output contract
+and Docker, Kubernetes, systemd, and Loki collection guidance.
+
+### OpenTelemetry Tracing
+
+All HTTP services support optional environment-driven OpenTelemetry tracing,
+W3C context extraction, delegated-operation propagation, and structured-log
+correlation. Tracing is disabled by default. See the [telemetry
+guide](docu/admin/telemetry.md) for configuration and the [observability
+example](examples/BaSyxObservabilityExample/README.md) for a Collector, Tempo,
+Alloy, Loki, and Grafana setup.
+
+Configuration is managed via YAML files in `cmd/<service>/config.yaml` and environment variables. Key variables include database connection settings (see [docu/admin/errors.md](docu/admin/errors.md) for troubleshooting):
+
+```yaml
+logging:
+    format: text
+    level: info
+
+server:
+    readHeaderTimeoutSeconds: 15
+    readTimeoutSeconds: 300
+    writeTimeoutSeconds: 300
+    idleTimeoutSeconds: 60
+    shutdownTimeoutSeconds: 10
+    pagination:
+        defaultLimit: 100
+        maxLimit: 1000
+    conditionalRequests:
+        # Answer 428 to writes of existing resources without If-Match.
+        requireIfMatch: false
+
+postgres:
+    # Either set dsn or the individual connection fields below. Do not mix them.
+    # dsn: postgres://user:password@db:5432/basyx?sslmode=require
+    host: localhost
+    port: 5432
+    user: postgres
+    password: postgres
+    dbname: basyx
+    sslmode: disable
+    sslcert: ""
+    sslkey: ""
+    sslrootcert: ""
+    connectTimeoutSeconds: 0
+    applicationName: ""
+    fallbackApplicationName: ""
+    searchPath: ""
+    options: ""
+    timezone: ""
+    maxOpenConnections: 50
+    maxIdleConnections: 25
+    connMaxLifetimeMinutes: 5
+    connMaxIdleTimeMinutes: 0
+
+    # Optional read-only endpoint for eligible reads in PostgreSQL-backed HTTP services.
+    # Omit this block to reuse the writer pool.
+    # reader:
+    #     host: postgres-reader
+    #     port: 5432
+    #     user: postgres
+    #     password: postgres
+    #     dbname: basyx
+    #     sslmode: require
+    #     maxOpenConnections: 50
+    #     maxIdleConnections: 25
+    #     connMaxLifetimeMinutes: 5
+    #     connMaxIdleTimeMinutes: 0
 ```
+
+Or via `.env`:
+
+```env
+SERVER_READ_HEADER_TIMEOUT_SECONDS=15
+SERVER_READ_TIMEOUT_SECONDS=300
+SERVER_WRITE_TIMEOUT_SECONDS=300
+SERVER_IDLE_TIMEOUT_SECONDS=60
+SERVER_SHUTDOWN_TIMEOUT_SECONDS=10
+SERVER_PAGINATION_DEFAULT_LIMIT=100
+SERVER_PAGINATION_MAX_LIMIT=1000
+SERVER_CONDITIONALREQUESTS_REQUIREIFMATCH=false
+
+# Either set POSTGRES_DSN or the individual connection variables below. Do not mix them.
+# POSTGRES_DSN=postgres://user:password@db:5432/basyx?sslmode=require
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_DBNAME=basyx
+POSTGRES_SSLMODE=disable
+POSTGRES_SSLCERT=
+POSTGRES_SSLKEY=
+POSTGRES_SSLROOTCERT=
+POSTGRES_CONNECTTIMEOUTSECONDS=0
+POSTGRES_APPLICATIONNAME=
+POSTGRES_FALLBACKAPPLICATIONNAME=
+POSTGRES_SEARCHPATH=
+POSTGRES_OPTIONS=
+POSTGRES_TIMEZONE=
+POSTGRES_MAXOPENCONNECTIONS=50
+POSTGRES_MAXIDLECONNECTIONS=25
+POSTGRES_CONNMAXLIFETIMEMINUTES=5
+POSTGRES_CONNMAXIDLETIMEMINUTES=0
+
+# Optional reader connection. Set either POSTGRES_READER_DSN or the individual
+# reader connection variables. Omit all reader variables to reuse the writer.
+# POSTGRES_READER_DSN=postgres://user:password@postgres-reader:5432/basyx?sslmode=require
+# POSTGRES_READER_HOST=postgres-reader
+# POSTGRES_READER_PORT=5432
+# POSTGRES_READER_USER=postgres
+# POSTGRES_READER_PASSWORD=postgres
+# POSTGRES_READER_DBNAME=basyx
+# POSTGRES_READER_SSLMODE=require
+# POSTGRES_READER_SSLCERT=
+# POSTGRES_READER_SSLKEY=
+# POSTGRES_READER_SSLROOTCERT=
+# POSTGRES_READER_CONNECTTIMEOUTSECONDS=10
+# POSTGRES_READER_APPLICATIONNAME=
+# POSTGRES_READER_FALLBACKAPPLICATIONNAME=
+# POSTGRES_READER_SEARCHPATH=
+# POSTGRES_READER_OPTIONS=
+# POSTGRES_READER_TIMEZONE=
+# POSTGRES_READER_MAXOPENCONNECTIONS=50
+# POSTGRES_READER_MAXIDLECONNECTIONS=25
+# POSTGRES_READER_CONNMAXLIFETIMEMINUTES=5
+# POSTGRES_READER_CONNMAXIDLETIMEMINUTES=0
+```
+
+All HTTP timeout values are in seconds and must be greater than zero. The legacy Viper-derived names such as `SERVER_READTIMEOUTSECONDS` still work; readable aliases with underscores and `BASYX_` prefixes, such as `BASYX_SERVER_READ_TIMEOUT_SECONDS`, are also supported.
+
+`server.pagination.defaultLimit` is the page size used when a request omits `limit`, and `server.pagination.maxLimit` is the largest accepted `limit`. Both apply to every paginated endpoint of every service, including the Event Feed. A larger `limit` is rejected with HTTP 400 instead of being clamped. Both values must be greater than zero, `maxLimit` must not be smaller than `defaultLimit`, and `maxLimit` must not exceed `2147483646`. The former `eventing.feed.maxPageSize` setting has been removed; the Event Feed uses these values.
+
+All services support HTTP conditional requests with `ETag`, `If-Match` and `If-None-Match`. `server.conditionalRequests.requireIfMatch` makes `If-Match` mandatory for writes to existing resources, which are then answered with HTTP 428 when it is missing. See [Conditional requests](docu/user/conditional_requests.md).
+
+PostgreSQL pool limits apply to every service process or Kubernetes pod. Size the deployment so that the sum of `maxOpenConnections` across all replicas and database-backed services stays below PostgreSQL's usable connection budget, with capacity reserved for administration and migrations. The defaults are 50 open connections, 25 idle connections, and a five-minute connection lifetime. Zero uses the common default for these three values; when the default idle limit would exceed an explicitly smaller open limit, it is capped at the open limit. `connMaxIdleTimeMinutes: 0` disables idle-time recycling. An explicitly configured idle limit greater than the open limit is rejected during startup.
+
+All PostgreSQL-backed HTTP services support an optional `postgres.reader` connection with independent pool limits. Eligible repository, registry, discovery, company lookup, DPP, and AASX file reads use this endpoint, including the corresponding APIs hosted by the AAS Environment. Mutations, transaction work, schema checks, asynchronous jobs, authorization policy storage, upload staging, and reads that guard mutations remain on the writer. The Configuration Service and the history evidence command-line tooling are writer-only because they perform schema or mixed administrative work. Reader results are eventually consistent and can lag behind a successful write. Replica lag also applies to deletions and authorization-relevant attribute changes, so a reader may briefly return the preceding resource state; deployments requiring immediate revocation must keep affected reads on the writer or use replication guarantees that meet the required revocation window. Configuring a reader is an explicit acceptance of that behavior: startup fails when the configured reader is unavailable, and requests are not silently rerouted to the writer. Account for the writer and reader limits separately when calculating the total PostgreSQL connection budget.
+
+Binary uploads and AASX package expansion are bounded independently:
+
+```yaml
+general:
+    uploadMaxSizeBytes: 134217728
+    aasxMaxPartCount: 10000
+    aasxMaxOPCMetadataSizeBytes: 16777216
+    aasxMaxPartExpandedSizeBytes: 134217728
+    aasxMaxTotalExpandedSizeBytes: 536870912
+    aasxMaxThumbnailSizeBytes: 16777216
+```
+
+`uploadMaxSizeBytes` limits the uploaded file content for AASX packages, File element attachments, and thumbnails. Multipart metadata and framing use a separate bounded allowance, so a file whose content exactly matches the configured limit is accepted. The default 128 MiB file limit therefore accommodates common 50 MiB PDF attachments. The AASX limits constrain entry count, expanded OPC metadata, each expanded part, all expanded payload parts combined, and thumbnails respectively. The 512 MiB total expansion default allows a package to contain multiple large payload parts while the 128 MiB per-part limit continues to bound any single expanded file. All limits must be positive, and the total expanded limit must be greater than or equal to the per-part limit, which must be greater than or equal to the thumbnail limit.
+
+The Submodel Repository's `general.delegatedOperationResponseMaxSizeBytes` limits the JSON response read from a delegated Operation, for both synchronous and asynchronous invocation. Its default is 1 MiB (1048576 bytes). Set a positive byte count in the service configuration or via `GENERAL_DELEGATEDOPERATIONRESPONSEMAXSIZEBYTES` to allow larger results. The repository buffers the delegated response in memory, so choose a limit appropriate for the deployment. This setting does not affect File element attachment downloads.
+
+AASX request bodies and generated specification parts use transaction-scoped PostgreSQL large objects for seekable staging; no writable local temporary directory is required. Package parts, attachments, thumbnails, and generated AASX output are streamed. The parsed AAS object model remains in memory because the current AAS SDK requires an in-memory model representation.
+
+- `POST /upload`
+- `POST /upload-async`
+- `PUT /shells/{aasIdentifier}/asset-information/thumbnail`
+- `PUT /shells/{aasIdentifier}/submodels/{submodelIdentifier}/submodel-elements/{idShortPath}/attachment`
+- `PUT /submodels/{submodelIdentifier}/submodel-elements/{idShortPath}/attachment`
+
+For `aasenvironmentservice`, startup preconfiguration can import AAS files automatically:
+
+```yaml
+general:
+    aasPreconfigPaths:
+        - ./examples/BaSyxMinimalExample/aas
+        - ./myDevice.aasx
+```
+
+Or via environment variable:
+
+```env
+GENERAL_AAS_PRECONFIG_PATHS=./examples/BaSyxMinimalExample/aas,./myDevice.aasx
+```
+
+Each configured source can be a file or directory. Directories are scanned recursively for `.aasx`, `.json`, and `.xml` files.
+
+Upload and startup preconfiguration use the AAS 3.2 parsing stack. For backward compatibility, XML payloads with lower or equal AAS v3 namespace versions (for example `https://admin-shell.io/aas/3/0`) are adapted to the current namespace before parsing, and a warning is logged.
+
+## 5. Code Style & Conventions
+
+- Use Go modules (`go.mod`) for dependency management
+- Follow GoDoc conventions ([godoc_tips.md](docu/developer/godoc_tips.md))
+- Run the linter before submitting PRs:
+    ```sh
+    bash scripts/lint.sh
+    ```
+- Use `//nolint:<linter>` comments sparingly and explain why
+- Auto-generated model files may not conform to all linter rules
+
+## 6. Module Structure
+
+- `cmd/` - Service entry points, configs, Dockerfiles
+- `cmd/*/openapi.yaml` - Service OpenAPI specifications and API contracts
+- `internal/` - Core business logic, persistence, integration tests
+- `pkg/` - Generated Go server stubs and reusable service packages
+- `examples/` - Minimal working examples, Docker Compose setups
+- `docu/` - Documentation organized by reader; start with the [documentation index](docu/README.md)
+- `docu/developer/database/` - Database schema documentation, including `basyxconfigurationservice` schema-version and clean/dirty state behavior
+
+See [structure.md](docu/developer/structure.md) and related files for details on each module.
+
+## 7. Common Workflows
+
+### Build & Run
+
+- Build and run services:
+    ```sh
+    go run ./cmd/<service>/main.go -config ./cmd/<service>/config.yaml
+    ```
+- Use VSCode launch scripts in `.vscode/launch.json` for debugging
+
+### Test
+
+- Run all Go package tests:
+    ```sh
+    go test -v ./...
+    ```
+- Run integration tests for a component:
+    ```sh
+    go test -v ./internal/<component>/integration_tests
+    ```
+
+### Lint
+
+- Run linter:
+    ```sh
+    bash scripts/lint.sh
+    ```
+
+## 8. API Usage
+
+- OpenAPI specs are in `cmd/<service>/openapi.yaml`
+- Use generated server stubs and reusable API packages in `pkg/`
+- Example endpoint: `/submodels/{id}/submodel-elements/{idShort}/attachment`
+- AAS environment import endpoint: `/upload` (multipart/form-data with file part `file`). The import is all-or-nothing: every resource of the file is stored, or none is.
+- Asynchronous AAS environment import: `/upload-async` accepts the same payload and returns an operation handle; poll `/upload-async/status/{handleId}` and read `/upload-async/result/{handleId}`, as for the AASX File Server's `/packages-async`.
+- Environment upload and serialization support ABAC `IDENTIFIABLE` grants for AAS, Submodels, and ConceptDescriptions. Grants stay within their object type; exports include only visible objects and filtered elements. See [environment authorization](docu/developer/security_architecture.md#environment-upload-and-serialization) for selection, binary content, and import behavior.
+- Supported upload media types: `application/aasx+xml`, `application/aasx+json`, `application/asset-administration-shell+xml`, `application/asset-administration-shell+json`, `application/json`, `application/xml`, `text/xml`
+- Query fragment filters use existential parent-level evaluation by default. Set `"$match": true` explicitly when a request filter must be evaluated against the current fragment row. See the [query language guide](docu/developer/query_language/architecture.md#explicit-row-local-fragment-matching).
+- Query and security fragment filters cannot target the mandatory `$sm#id` or the `idShort` of a named submodel element. Explicit element `idShort` filters are permitted for direct list members; the general `$sme#idShort` filter applies only to those members. Update existing security policies containing prohibited fragments before loading them.
+- AAS v3.2 history and recent changes: [user guide](docu/user/aas_api_v3_2.md) and [runtime notes](docu/developer/aas_v3_2_runtime.md)
+- See [structure_cmd.md](docu/developer/structure_cmd.md) for details
+
+## 9. Contribution Guidelines
+
+- Fork the repository and create a feature branch
+- Write clear commit messages and PR descriptions
+- Add/update GoDoc comments for all exported code
+- Run tests and linter before submitting
+- Cover new features with integration tests
+- Document public APIs in OpenAPI YAML files
+- Add a changelog fragment for every notable user-visible or security-related
+  change. Open a draft PR to obtain its number, install the CI version with
+  `go install github.com/miniscruff/changie@v1.26.0`, then run `changie new`.
+- Do not edit `CHANGELOG.md` directly. It is generated from the reviewed files
+  under `.changes/` during a release.
+
+## 10. Repository Automation
+
+- CI/CD pipelines run tests and linter on each PR
+- Ensure your local environment matches CI versions (see [linter.md](docu/developer/linter.md))
+- Use provided tasks in VSCode or CLI for build/test/lint automation
+
+### Create a Release
+
+1. Open **Actions → Release → Run workflow**.
+2. Enter a new tag such as `v1.0.10`.
+
+The workflow batches the reviewed Changie fragments, commits the generated
+changelog to the current default branch, creates an annotated tag and a draft
+GitHub release, and starts the Docker/SBOM build and vulnerability scan. The
+draft is published automatically only after every release image is built,
+signed, attested, and its SBOM assets are attached. Rerunning the same version
+reconciles incomplete work without creating another release. Repository Actions
+must have permission to push the generated release commit to the default branch.
+
+## 11. Security & Supply Chain Verification
+
+- Security reporting policy: [Eclipse BaSyx SECURITY.md](https://github.com/eclipse-basyx/.github/blob/main/SECURITY.md)
+- Supply-chain trust model, signing, attestations, and SBOM verification: [docu/security/SUPPLY_CHAIN_SECURITY.md](docu/security/SUPPLY_CHAIN_SECURITY.md)
+- Security guides for administrators and API users: [docu/security/README.md](docu/security/README.md)
+- Runtime security architecture (OIDC + ABAC): [docu/developer/security_architecture.md](docu/developer/security_architecture.md)
+
+Release and snapshot images are signed with Cosign keyless identity and include provenance and SBOM attestations. For full verification commands, see [docu/security/SUPPLY_CHAIN_SECURITY.md](docu/security/SUPPLY_CHAIN_SECURITY.md).
+
+## 12. Troubleshooting & Error Reference
+
+- See [docu/admin/errors.md](docu/admin/errors.md) for common error scenarios and solutions
+- For security and authorization, see [docu/security/REGISTRY_SECURITY.md](docu/security/REGISTRY_SECURITY.md)
+
+## 13. Glossary of Terms & Abbreviations
+
+- **AAS**: Asset Administration Shell – digital representation of assets
+- **Submodel**: Modular part of an AAS
+- **SME**: Submodel Element
+- **OIDC**: OpenID Connect – authentication protocol
+- **ABAC**: Attribute-Based Access Control
+- **OpenAPI**: Specification for RESTful APIs
+
+---
+
+For further details, see the [docs folder](docu), the [BaSyx wiki](https://wiki.basyx.org), and links above. If you encounter issues, please open an issue on GitHub or consult the [error documentation](docu/admin/errors.md).
+
+## Database Schema
+
+See [docu/developer/database/](docu/developer/database/) and [sql_examples](sql_examples/) for details on tables, relationships, and large object handling.
+
+## Frequently Asked Questions
+
+**Q: How do I add a new component?**
+
+- Add main.go in `cmd/<COMPONENT_NAME>/main.go`
+- Implement the logic in `internal/<COMPONENT_NAME>/`
+- Save and use OpenAPI specs in `cmd/<COMPONENT_NAME>/openapi.yaml`
+- Add tests in `internal/<COMPONENT_NAME>/integration_tests/`
+
+**Q: How do I handle file attachments?**
+
+- Use the standardized File SME attachment and asset-information thumbnail endpoints.
+- Internal uploads store `/aasx/files/<opaque-token>/<safe-filename>` in the model. This is an AASX package-part path, not a new HTTP endpoint.
+- See the repository integration tests for upload/download examples.
+
+**Q: Where do I find API documentation?**
+
+- OpenAPI YAML files in `cmd/*/openapi.yaml`
+- GoDoc for package-level documentation
+
+## Further Reading
+
+- [Eclipse BaSyx Documentation](https://www.eclipse.org/basyx/)
+- [IDTA AAS Specification](https://industrialdigitaltwin.org/en/content-hub/aasspecifications)
+
+---
+
+For any questions, open an issue or contact the maintainers.

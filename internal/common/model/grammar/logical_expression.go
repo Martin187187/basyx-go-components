@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -24,18 +24,27 @@
 ******************************************************************************/
 
 // Package grammar defines the data structures for representing logical expressions in the grammar model.
-// Author: Aaron Zielstorff ( Fraunhofer IESE ), Jannik Fried ( Fraunhofer IESE )
+// Author: Aaron Zielstorff ( Fraunhofer IESE ), Jannik Fried ( Fraunhofer IESE ), Martin Stemmer ( Fraunhofer IESE )
+//
+//nolint:all
 package grammar
 
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
-	"strings"
 
-	"github.com/doug-martin/goqu/v9"
-	"github.com/doug-martin/goqu/v9/exp"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
 )
+
+// MarshalJSON serializes internal indeterminate markers as a valid false
+// placeholder. Internal deep-copy code restores the marker after unmarshalling.
+func (le LogicalExpression) MarshalJSON() ([]byte, error) {
+	if le.Indeterminate {
+		return []byte(`{"$boolean":false}`), nil
+	}
+	type plain LogicalExpression
+	return json.Marshal(plain(le))
+}
 
 // LogicalExpression represents a logical expression tree for AAS access control rules.
 //
@@ -63,11 +72,17 @@ import (
 //	  {"$gt": ["$sme.temperature#value", "100"]}
 //	]}
 type LogicalExpression struct {
+	// Indeterminate is an internal runtime marker emitted during partial evaluation.
+	Indeterminate bool `json:"-" yaml:"-" mapstructure:"-"`
+
 	// And corresponds to the JSON schema field "$and".
 	And []LogicalExpression `json:"$and,omitempty" yaml:"$and,omitempty" mapstructure:"$and,omitempty"`
 
 	// Boolean corresponds to the JSON schema field "$boolean".
 	Boolean *bool `json:"$boolean,omitempty" yaml:"$boolean,omitempty" mapstructure:"$boolean,omitempty"`
+
+	// BoolCast corresponds to the JSON schema field "$boolCast".
+	BoolCast *Value `json:"$boolCast,omitempty" yaml:"$boolCast,omitempty" mapstructure:"$boolCast,omitempty"`
 
 	// Contains corresponds to the JSON schema field "$contains".
 	Contains StringItems `json:"$contains,omitempty" yaml:"$contains,omitempty" mapstructure:"$contains,omitempty"`
@@ -126,9 +141,17 @@ type LogicalExpression struct {
 //   - error: An error if the JSON is invalid or if array constraints are violated.
 //     Returns nil on successful unmarshaling and validation.
 func (le *LogicalExpression) UnmarshalJSON(value []byte) error {
+	if err := validateExpressionJSONComplexity(value); err != nil {
+		return err
+	}
+	if _, err := singleJSONMember(value, "logical-expression"); err != nil {
+		return err
+	}
+
 	type Plain LogicalExpression
 	var plain Plain
-	if err := json.Unmarshal(value, &plain); err != nil {
+
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &plain); err != nil {
 		return err
 	}
 	if plain.And != nil && len(plain.And) < 2 {
@@ -140,290 +163,333 @@ func (le *LogicalExpression) UnmarshalJSON(value []byte) error {
 	if plain.Or != nil && len(plain.Or) < 2 {
 		return fmt.Errorf("field %s length: must be >= %d", "$or", 2)
 	}
+	if plain.BoolCast != nil && plain.BoolCast.EffectiveTypeWithCast() == KindUnknown {
+		return fmt.Errorf("GRAMMAR-LOGEXPR-BOOLCAST: $boolCast requires a valid value operand")
+	}
+
+	// Enforce matching operand types for comparison operators (when both are known)
+	if err := validateComparisonItems(plain.Eq, "$eq"); err != nil {
+		return err
+	}
+	if err := validateComparisonItems(plain.Ne, "$ne"); err != nil {
+		return err
+	}
+	if err := validateOrderedComparisonItems(plain.Gt, "$gt"); err != nil {
+		return err
+	}
+	if err := validateOrderedComparisonItems(plain.Ge, "$ge"); err != nil {
+		return err
+	}
+	if err := validateOrderedComparisonItems(plain.Lt, "$lt"); err != nil {
+		return err
+	}
+	if err := validateOrderedComparisonItems(plain.Le, "$le"); err != nil {
+		return err
+	}
+	if err := validateStringItems(plain.Contains, "$contains"); err != nil {
+		return err
+	}
+	if err := validateStringItems(plain.StartsWith, "$starts-with"); err != nil {
+		return err
+	}
+	if err := validateStringItems(plain.EndsWith, "$ends-with"); err != nil {
+		return err
+	}
+	if err := validateStringItems(plain.Regex, "$regex"); err != nil {
+		return err
+	}
 	*le = LogicalExpression(plain)
 	return nil
 }
 
-// EvaluateToExpression converts the logical expression tree into a goqu SQL expression.
-//
-// This method traverses the logical expression tree and constructs a corresponding SQL
-// WHERE clause expression that can be used with the goqu query builder. It handles all
-// supported comparison operations, logical operators (AND, OR, NOT), and nested expressions.
-//
-// The method supports special handling for AAS-specific fields, particularly semantic IDs,
-// where additional constraints (like position = 0) may be added to the generated SQL.
-//
-// Supported operations:
-//   - Comparison: $eq, $ne, $gt, $ge, $lt, $le
-//   - Logical: $and (all true), $or (any true), $not (negation)
-//   - Boolean: Direct boolean literal evaluation
-//
-// Returns:
-//   - exp.Expression: A goqu expression that can be used in SQL WHERE clauses
-//   - error: An error if the expression is invalid, has no valid operation, or if
-//     evaluation of nested expressions fails
-func (le *LogicalExpression) EvaluateToExpression() (exp.Expression, error) {
-	// Handle comparison operations
-	if len(le.Eq) > 0 {
-		return le.evaluateComparison(le.Eq, "$eq")
+// validateComparisonItems mirrors the schema's equalityComparisonItems shape.
+func validateComparisonItems(items ComparisonItems, op string) error {
+	if len(items) == 0 {
+		return nil
 	}
-	if len(le.Ne) > 0 {
-		return le.evaluateComparison(le.Ne, "$ne")
+	if len(items) != 2 {
+		return fmt.Errorf("comparison %s requires exactly 2 operands, got %d", op, len(items))
 	}
-	if len(le.Gt) > 0 {
-		return le.evaluateComparison(le.Gt, "$gt")
-	}
-	if len(le.Ge) > 0 {
-		return le.evaluateComparison(le.Ge, "$ge")
-	}
-	if len(le.Lt) > 0 {
-		return le.evaluateComparison(le.Lt, "$lt")
-	}
-	if len(le.Le) > 0 {
-		return le.evaluateComparison(le.Le, "$le")
-	}
-
-	// Handle logical operations
-	if len(le.And) > 0 {
-		var expressions []exp.Expression
-		for i, nestedExpr := range le.And {
-			expr, err := nestedExpr.EvaluateToExpression()
-			if err != nil {
-				return nil, fmt.Errorf("error evaluating AND condition at index %d: %w", i, err)
-			}
-			expressions = append(expressions, expr)
+	if valueIsDirectClaimPath(items[0]) || valueIsDirectClaimPath(items[1]) {
+		if op != "$eq" || !isClaimPathEqualityShape(items) {
+			return fmt.Errorf("GRAMMAR-LOGEXPR-CLAIMPATH: direct CLAIMPATH is only valid in $eq with a scalar string operand")
 		}
-		return goqu.And(expressions...), nil
+		return nil
 	}
-
-	if len(le.Or) > 0 {
-		var expressions []exp.Expression
-		for i, nestedExpr := range le.Or {
-			expr, err := nestedExpr.EvaluateToExpression()
-			if err != nil {
-				return nil, fmt.Errorf("error evaluating OR condition at index %d: %w", i, err)
-			}
-			expressions = append(expressions, expr)
-		}
-		return goqu.Or(expressions...), nil
+	if countEqualityComparisonShapes(items) == 1 {
+		return nil
 	}
-
-	if le.Not != nil {
-		expr, err := le.Not.EvaluateToExpression()
-		if err != nil {
-			return nil, fmt.Errorf("error evaluating NOT condition: %w", err)
-		}
-		return goqu.L("NOT (?)", expr), nil
-	}
-
-	// Handle boolean literal
-	if le.Boolean != nil {
-		return goqu.L("?", *le.Boolean), nil
-	}
-
-	return nil, fmt.Errorf("logical expression has no valid operation")
+	return fmt.Errorf("GRAMMAR-LOGEXPR-CMPTYPE: %s operands do not match equalityComparisonItems", op)
 }
 
-// evaluateComparison evaluates a comparison operation with the given operands
-func (le *LogicalExpression) evaluateComparison(operands []Value, operation string) (exp.Expression, error) {
-	if len(operands) != 2 {
-		return nil, fmt.Errorf("comparison operation %s requires exactly 2 operands, got %d", operation, len(operands))
+func validateOrderedComparisonItems(items ComparisonItems, op string) error {
+	if len(items) == 0 {
+		return nil
 	}
-
-	leftOperand := &operands[0]
-	rightOperand := &operands[1]
-
-	return HandleComparison(leftOperand, rightOperand, operation)
+	if len(items) != 2 {
+		return fmt.Errorf("comparison %s requires exactly 2 operands, got %d", op, len(items))
+	}
+	if valueIsDirectClaimPath(items[0]) || valueIsDirectClaimPath(items[1]) {
+		return fmt.Errorf("GRAMMAR-LOGEXPR-CLAIMPATH: direct CLAIMPATH is not valid with %s", op)
+	}
+	if countOrderedComparisonShapes(items) == 1 {
+		return nil
+	}
+	return fmt.Errorf("GRAMMAR-LOGEXPR-CMPTYPE: %s operands do not match orderedComparisonItems", op)
 }
 
-// ParseAASQLFieldToSQLColumn translates AAS query language field names to SQL column names.
-//
-// This function maps AAS-specific field references (like $sm#idShort, $sm#semanticId) to their
-// corresponding database column names used in SQL queries. It handles both exact matches and
-// pattern-based field references (e.g., semanticId.keys[].value).
-//
-// Supported field mappings:
-//   - $sm#idShort -> s.id_short
-//   - $sm#id -> s.id
-//   - $sm#semanticId -> semantic_id_reference_key.value
-//   - $sm#semanticId.type -> semantic_id_reference.type
-//   - $sm#semanticId.keys[].value -> semantic_id_reference_key.value
-//   - $sm#semanticId.keys[].type -> semantic_id_reference_key.type
-//   - $sm#semanticId.keys[N].value -> semantic_id_reference_key.value (with position constraint)
-//   - $sm#semanticId.keys[N].type -> semantic_id_reference_key.type (with position constraint)
-//
-// Parameters:
-//   - field: AAS query language field reference string
-//
-// Returns:
-//   - string: The corresponding SQL column name, or the original field if no mapping exists
-func ParseAASQLFieldToSQLColumn(field string) string {
-	switch field {
-	case "$sm#idShort":
-		return "s.id_short"
-	case "$sm#id":
-		return "s.id"
-	case "$sm#semanticId":
-		return "semantic_id_reference_key.value"
-	case "$sm#semanticId.type":
-		return "semantic_id_reference.type"
-	case "$sm#semanticId.keys[].value":
-		return "semantic_id_reference_key.value"
-	case "$sm#semanticId.keys[].type":
-		return "semantic_id_reference_key.type"
-	}
-
-	if strings.HasPrefix(field, "$sm#semanticId.keys[") && strings.HasSuffix(field, "].value") {
-		return "semantic_id_reference_key.value"
-	}
-	if strings.HasPrefix(field, "$sm#semanticId.keys[") && strings.HasSuffix(field, "].type") {
-		return "semantic_id_reference_key.type"
-	}
-
-	return field
+func isClaimPathEqualityShape(items ComparisonItems) bool {
+	return valueIsDirectClaimPath(items[0]) && isClaimPathScalarValue(items[1]) ||
+		valueIsDirectClaimPath(items[1]) && isClaimPathScalarValue(items[0])
 }
 
-// HandleComparison builds a SQL comparison expression from two Value operands.
-//
-// This function handles all combinations of operand types: field-to-field, field-to-value,
-// value-to-field, and value-to-value comparisons. It validates that value-to-value comparisons
-// have matching types and adds special constraints for AAS semantic ID fields, such as position
-// constraints for specific key indices.
-//
-// Special handling for semantic IDs:
-//   - Shorthand references ($sm#semanticId) add position = 0 constraint
-//   - Specific key references ($sm#semanticId.keys[N].value) add position = N constraint
-//   - Wildcard references ($sm#semanticId.keys[].value) match any position
-//
-// Parameters:
-//   - leftOperand: The left side of the comparison (field or value)
-//   - rightOperand: The right side of the comparison (field or value)
-//   - operation: The comparison operator ($eq, $ne, $gt, $ge, $lt, $le)
-//
-// Returns:
-//   - exp.Expression: A goqu expression representing the comparison with any necessary constraints
-//   - error: An error if the operands are invalid, types don't match, or the operation is unsupported
-func HandleComparison(leftOperand, rightOperand *Value, operation string) (exp.Expression, error) {
+func valueIsDirectClaimPath(value Value) bool {
+	return attributeIsClaimPath(value.Attribute)
+}
 
-	// Convert both operands
-	leftSQL, err := toSQLComponent(leftOperand, "left")
-	if err != nil {
-		return nil, err
+func isClaimPathScalarValue(value Value) bool {
+	return value.StrVal != nil || value.StrCast != nil
+}
+
+func countEqualityComparisonShapes(items ComparisonItems) int {
+	return countOrderedComparisonShapes(items) + boolToInt(isBoolComparisonShape(items))
+}
+
+func countOrderedComparisonShapes(items ComparisonItems) int {
+	return boolToInt(areBoth(items, isStringValueOperand)) +
+		boolToInt(isNumericalComparisonShape(items)) +
+		boolToInt(isHexComparisonShape(items)) +
+		boolToInt(isDateTimeComparisonShape(items)) +
+		boolToInt(isTimeComparisonShape(items))
+}
+
+func isNumericalComparisonShape(items ComparisonItems) bool {
+	return areBoth(items, isNumericalOperand) ||
+		(isNumericalOperand(items[0]) && isFieldOperand(items[1])) ||
+		(isFieldOperand(items[0]) && isNumericalOperand(items[1]))
+}
+
+func isHexComparisonShape(items ComparisonItems) bool {
+	return areBoth(items, isHexOperand) ||
+		(isHexOperand(items[0]) && isFieldOperand(items[1])) ||
+		(isFieldOperand(items[0]) && isHexOperand(items[1]))
+}
+
+func isBoolComparisonShape(items ComparisonItems) bool {
+	return areBoth(items, isBoolOperand) ||
+		(isBoolOperand(items[0]) && isFieldOperand(items[1])) ||
+		(isFieldOperand(items[0]) && isBoolOperand(items[1]))
+}
+
+func isDateTimeComparisonShape(items ComparisonItems) bool {
+	return areBoth(items, isDateTimeOperand) ||
+		(isDateTimeOperand(items[0]) && isFieldOperand(items[1])) ||
+		(isFieldOperand(items[0]) && isDateTimeOperand(items[1]))
+}
+
+func isTimeComparisonShape(items ComparisonItems) bool {
+	return areBoth(items, isTimeOperand) ||
+		(isTimeOperand(items[0]) && isFieldOperand(items[1])) ||
+		(isFieldOperand(items[0]) && isTimeOperand(items[1]))
+}
+
+func areBoth(items ComparisonItems, pred func(Value) bool) bool {
+	return len(items) == 2 && pred(items[0]) && pred(items[1])
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
 	}
+	return 0
+}
 
-	rightSQL, err := toSQLComponent(rightOperand, "right")
-	if err != nil {
-		return nil, err
+func validateStringItems(items StringItems, op string) error {
+	if len(items) == 0 {
+		return nil
 	}
+	if len(items) != 2 {
+		return fmt.Errorf("GRAMMAR-LOGEXPR-STRINGITEMS: %s requires exactly 2 operands, got %d", op, len(items))
+	}
+	if op == "$contains" && isDirectClaimPathString(items[0]) {
+		if !isScalarClaimPathStringOperand(items[1]) {
+			return fmt.Errorf("GRAMMAR-LOGEXPR-CONTAINSITEMS: $contains with CLAIMPATH requires a scalar string second operand")
+		}
+		return nil
+	}
+	if isDirectClaimPathString(items[1]) {
+		return fmt.Errorf("GRAMMAR-LOGEXPR-STRINGITEMS: %s does not allow CLAIMPATH in this position", op)
+	}
+	if isDirectClaimPathString(items[0]) {
+		return fmt.Errorf("GRAMMAR-LOGEXPR-STRINGITEMS: %s does not allow direct CLAIMPATH", op)
+	}
+	return nil
+}
 
-	// Validate value-to-value comparisons have matching types
-	if !leftOperand.IsField() && !rightOperand.IsField() {
-		if leftOperand.GetValueType() != rightOperand.GetValueType() {
-			return nil, fmt.Errorf("cannot compare different value types: %s and %s",
-				leftOperand.GetValueType(), rightOperand.GetValueType())
+func isDirectClaimPathString(value StringValue) bool {
+	return attributeIsClaimPath(value.Attribute)
+}
+
+func isScalarClaimPathStringOperand(value StringValue) bool {
+	return value.StrVal != nil || value.StrCast != nil
+}
+
+// AssertLogicalExpressionRequired checks if the required fields are not zero-ed
+func AssertLogicalExpressionRequired(obj LogicalExpression) error {
+	for _, el := range obj.And {
+		if err := AssertLogicalExpressionRequired(el); err != nil {
+			return err
 		}
 	}
-
-	// Check if either operand is $sm#semanticID field
-	isLeftShorthandSemanticID := isSemanticIDShorthandField(leftOperand)
-	isRightShorthandSemanticID := isSemanticIDShorthandField(rightOperand)
-
-	isLeftSpecificKeyValueSemanticID := isSemanticIDSpecificKeyValueField(leftOperand, false)
-	isRightSpecificKeyValueSemanticID := isSemanticIDSpecificKeyValueField(rightOperand, false)
-
-	isLeftSpecificKeyTypeSemanticID := isSemanticIDSpecificKeyValueField(leftOperand, true)
-	isRightSpecificKeyTypeSemanticID := isSemanticIDSpecificKeyValueField(rightOperand, true)
-
-	// Build the comparison expression
-	comparisonExpr, err := buildComparisonExpression(leftSQL, rightSQL, operation)
-	if err != nil {
-		return nil, err
-	}
-
-	// If semantic_id is involved, add position = 0 constraint
-	if isLeftShorthandSemanticID || isRightShorthandSemanticID {
-		positionConstraint := goqu.I("semantic_id_reference_key.position").Eq(0)
-		return goqu.And(comparisonExpr, positionConstraint), nil
-	} else if (isLeftSpecificKeyValueSemanticID || isRightSpecificKeyValueSemanticID) || (isLeftSpecificKeyTypeSemanticID || isRightSpecificKeyTypeSemanticID) {
-
-		operandToUse := leftOperand
-		if isRightSpecificKeyValueSemanticID || isRightSpecificKeyTypeSemanticID {
-			operandToUse = rightOperand
-		}
-
-		start, end := getStartAndEndIndicesOfBrackets(operandToUse)
-		if isNotWildcardAndValidIndices(start, end) {
-			positionStrOnError, position, err := getPositionAsInteger(operandToUse, start, end)
-			if err == nil {
-				positionConstraint := goqu.I("semantic_id_reference_key.position").Eq(position)
-				return goqu.And(comparisonExpr, positionConstraint), nil
-			}
-			return nil, fmt.Errorf("invalid position in semanticID key field: %s", positionStrOnError)
+	for _, el := range obj.Match {
+		if err := AssertMatchExpressionRequired(el); err != nil {
+			return err
 		}
 	}
-	return comparisonExpr, nil
-}
-
-func getPositionAsInteger(operandToUse *Value, start int, end int) (string, int, error) {
-	positionStr := string(*operandToUse.Field)[start+1 : end]
-	position, err := strconv.Atoi(positionStr)
-	return positionStr, position, err
-}
-
-func isNotWildcardAndValidIndices(start, end int) bool {
-	return start != -1 && end != -1 && start < end && (end-start > 1)
-}
-
-func getStartAndEndIndicesOfBrackets(operandToUse *Value) (int, int) {
-	start := strings.Index(string(*operandToUse.Field), "[")
-	end := strings.Index(string(*operandToUse.Field), "]")
-	return start, end
-}
-
-func isSemanticIDShorthandField(operand *Value) bool {
-	return operand.IsField() && operand.Field != nil && string(*operand.Field) == "$sm#semanticId"
-}
-
-func isSemanticIDSpecificKeyValueField(operand *Value, isTypeCheck bool) bool {
-	suffix := "value"
-	if isTypeCheck {
-		suffix = "type"
-	}
-	if !operand.IsField() || operand.Field == nil {
-		return false
-	}
-	field := string(*operand.Field)
-	return strings.HasPrefix(field, "$sm#semanticId.keys[") && strings.HasSuffix(field, "]."+suffix)
-}
-
-func toSQLComponent(operand *Value, position string) (interface{}, error) {
-	if operand.IsField() {
-		if operand.Field == nil {
-			return nil, fmt.Errorf("%s operand is not a valid field", position)
+	for _, el := range obj.Or {
+		if err := AssertLogicalExpressionRequired(el); err != nil {
+			return err
 		}
-		fieldName := string(*operand.Field)
-		fieldName = ParseAASQLFieldToSQLColumn(fieldName)
-		return goqu.I(fieldName), nil
 	}
-	return goqu.V(operand.GetValue()), nil
+	if obj.Not != nil {
+		if err := AssertLogicalExpressionRequired(*obj.Not); err != nil {
+			return err
+		}
+	}
+	if obj.BoolCast != nil {
+		if err := AssertValueRequired(*obj.BoolCast); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Eq {
+		if err := AssertValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Ne {
+		if err := AssertValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Gt {
+		if err := AssertValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Ge {
+		if err := AssertValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Lt {
+		if err := AssertValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Le {
+		if err := AssertValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Contains {
+		if err := AssertStringValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.StartsWith {
+		if err := AssertStringValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.EndsWith {
+		if err := AssertStringValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Regex {
+		if err := AssertStringValueRequired(el); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// buildComparisonExpression is a helper function to build comparison expressions
-func buildComparisonExpression(left interface{}, right interface{}, operation string) (exp.Expression, error) {
-	switch operation {
-	case "$eq":
-		return exp.NewLiteralExpression("? = ?", left, right), nil
-	case "$ne":
-		return exp.NewLiteralExpression("? != ?", left, right), nil
-	case "$gt":
-		return exp.NewLiteralExpression("? > ?", left, right), nil
-	case "$ge":
-		return exp.NewLiteralExpression("? >= ?", left, right), nil
-	case "$lt":
-		return exp.NewLiteralExpression("? < ?", left, right), nil
-	case "$le":
-		return exp.NewLiteralExpression("? <= ?", left, right), nil
-	default:
-		return nil, fmt.Errorf("unsupported comparison operation: %s", operation)
+// AssertLogicalExpressionConstraints checks if the values respects the defined constraints
+func AssertLogicalExpressionConstraints(obj LogicalExpression) error {
+	for _, el := range obj.And {
+		if err := AssertLogicalExpressionConstraints(el); err != nil {
+			return err
+		}
 	}
+	for _, el := range obj.Match {
+		if err := AssertMatchExpressionConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Or {
+		if err := AssertLogicalExpressionConstraints(el); err != nil {
+			return err
+		}
+	}
+	if obj.Not != nil {
+		if err := AssertLogicalExpressionConstraints(*obj.Not); err != nil {
+			return err
+		}
+	}
+	if obj.BoolCast != nil {
+		if err := AssertValueConstraints(*obj.BoolCast); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Eq {
+		if err := AssertValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Ne {
+		if err := AssertValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Gt {
+		if err := AssertValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Ge {
+		if err := AssertValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Lt {
+		if err := AssertValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Le {
+		if err := AssertValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Contains {
+		if err := AssertStringValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.StartsWith {
+		if err := AssertStringValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.EndsWith {
+		if err := AssertStringValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Regex {
+		if err := AssertStringValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	return nil
 }

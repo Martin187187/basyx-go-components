@@ -1,0 +1,729 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
+// Package persistence provides Postgres-backed storage for the AASX file server.
+package persistence
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"io"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	aasx "github.com/aas-core-works/aas-package3-golang/v2"
+	"github.com/doug-martin/goqu/v9"
+	"github.com/doug-martin/goqu/v9/exp"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/binarycontent"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/conditional"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/pagination"
+	auth "github.com/eclipse-basyx/basyx-go-components/internal/common/security"
+)
+
+// PackageContentType is the media type of every AASX package in the AASX File Server API.
+const PackageContentType = "application/asset-administration-shell-package"
+
+// PackageRecord contains package metadata returned by list and write operations.
+type PackageRecord struct {
+	DBID      int64
+	PackageID string
+	FileName  string
+	AASIDs    []string
+}
+
+// PackageBinary combines package metadata with a streamed package body.
+// Content owns the read transaction and must be closed by the caller.
+type PackageBinary struct {
+	PackageRecord
+	Content io.ReadCloser
+}
+
+// AASXFileServerDatabase exposes package persistence operations.
+type AASXFileServerDatabase struct {
+	db       *sql.DB
+	readerDB *sql.DB
+}
+
+// NewAASXFileServerDatabaseFromDB creates an AASX database backend from a shared pool.
+//
+// Parameters:
+//   - db: Caller-owned PostgreSQL connection pool.
+//
+// Returns:
+//   - *AASXFileServerDatabase: Backend sharing db.
+//   - error: Validation error when db is nil.
+func NewAASXFileServerDatabaseFromDB(db *sql.DB) (*AASXFileServerDatabase, error) {
+	if db == nil {
+		return nil, common.NewErrBadRequest("AASXFS-NEWFROMDB-NILDB database handle must not be nil")
+	}
+	return NewAASXFileServerDatabaseFromPools(db, db)
+}
+
+// NewAASXFileServerDatabaseFromPools creates an AASX backend from caller-owned
+// writer and reader pools.
+func NewAASXFileServerDatabaseFromPools(writer *sql.DB, reader *sql.DB) (*AASXFileServerDatabase, error) {
+	if writer == nil {
+		return nil, common.NewErrBadRequest("AASXFS-NEWFROMPOOLS-NILWRITER writer database handle must not be nil")
+	}
+	if reader == nil {
+		return nil, common.NewErrBadRequest("AASXFS-NEWFROMPOOLS-NILREADER reader database handle must not be nil")
+	}
+
+	return &AASXFileServerDatabase{db: writer, readerDB: reader}, nil
+}
+
+func (p *AASXFileServerDatabase) readDB(ctx context.Context) *sql.DB {
+	return common.PostgresReadPool(ctx, p.db, p.readerDB)
+}
+
+// ListPackages returns package metadata for a page and the next cursor identifier, if any.
+func (p *AASXFileServerDatabase) ListPackages(ctx context.Context, limit int32, cursorID int64, aasID string) ([]PackageRecord, int64, error) {
+	var records []PackageRecord
+	var nextCursor int64
+	err := common.ExecuteInReadTransaction(ctx, p.readDB(ctx), "AASXFS-LISTPACKAGES-STARTTX", "AASXFS-LISTPACKAGES-COMMIT", func(tx *sql.Tx) error {
+		var txErr error
+		records, nextCursor, txErr = p.listPackagesInTransaction(ctx, tx, limit, cursorID, aasID)
+		return txErr
+	})
+	return records, nextCursor, err
+}
+
+func (p *AASXFileServerDatabase) listPackagesInTransaction(ctx context.Context, tx *sql.Tx, limit int32, cursorID int64, aasID string) ([]PackageRecord, int64, error) {
+	if limit <= 0 {
+		limit = common.DefaultPageLimit(ctx)
+	}
+
+	dialect := goqu.Dialect("postgres")
+	ds := dialect.From("aasx_package").
+		Select("id", "package_id", "file_name").
+		Order(goqu.I("id").Asc())
+
+	if cursorID > 0 {
+		ds = ds.Where(goqu.I("id").Gt(cursorID))
+	}
+
+	trimmedAASID := strings.TrimSpace(aasID)
+	if trimmedAASID != "" {
+		ds = ds.Where(
+			goqu.L(
+				"EXISTS (SELECT 1 FROM aasx_package_aas_id aa WHERE aa.package_db_id = aasx_package.id AND aa.aas_id = ?)",
+				trimmedAASID,
+			),
+		)
+	}
+
+	if granted, restricted := auth.ReBACOnlyRowCondition(ctx, auth.SemanticResourceAASXPackage, goqu.I("aasx_package.auth_uuid")); restricted {
+		ds = ds.Where(granted)
+	}
+
+	// #nosec G115 -- limit is normalized to a positive int32 value above.
+	ds = ds.Limit(uint(limit) + 1)
+
+	sqlQuery, args, err := ds.Prepared(true).ToSQL()
+	if err != nil {
+		return nil, 0, common.NewInternalServerError("AASXFS-LISTPACKAGES-BUILDSQL " + err.Error())
+	}
+
+	rows, err := tx.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, 0, common.NewInternalServerError("AASXFS-LISTPACKAGES-QUERY " + err.Error())
+	}
+	defer func() { _ = rows.Close() }()
+
+	records := make([]PackageRecord, 0, pagination.BufferCapacity(int(limit)+1))
+	for rows.Next() {
+		var row PackageRecord
+		if scanErr := rows.Scan(&row.DBID, &row.PackageID, &row.FileName); scanErr != nil {
+			return nil, 0, common.NewInternalServerError("AASXFS-LISTPACKAGES-SCAN " + scanErr.Error())
+		}
+		records = append(records, row)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, 0, common.NewInternalServerError("AASXFS-LISTPACKAGES-ROWS " + err.Error())
+	}
+
+	hasMore := len(records) > int(limit)
+	nextCursor := int64(0)
+	if hasMore {
+		nextCursor = records[limit].DBID
+		records = records[:limit]
+	}
+
+	for idx := range records {
+		aasIDs, aasErr := p.getAASIDsTx(ctx, tx, records[idx].DBID)
+		if aasErr != nil {
+			return nil, 0, aasErr
+		}
+		records[idx].AASIDs = aasIDs
+	}
+
+	return records, nextCursor, nil
+}
+
+// CreatePackage atomically persists a staged package and its metadata.
+//
+// Parameters:
+//   - ctx: Request context containing cancellation and configured AASX limits.
+//   - packageID: Unencoded package identifier to create.
+//   - file: Caller-owned staged package; promotion transfers its large object into persistence.
+//   - aasIDs: AAS identifiers associated with the package.
+//   - fileName: Preferred download filename.
+//
+// Returns:
+//   - *PackageRecord: Persisted package metadata.
+//   - error: Validation, conflict, inspection, promotion, or database error.
+func (p *AASXFileServerDatabase) CreatePackage(ctx context.Context, packageID string, file common.StagedUpload, aasIDs []string, fileName string) (*PackageRecord, error) {
+	record, _, err := p.putPackage(ctx, strings.TrimSpace(packageID), file, aasIDs, fileName, false)
+	if err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+// PutPackage atomically creates or replaces a staged package.
+//
+// When replacing a package, metadata, AAS identifiers, and the large-object OID
+// are swapped in one transaction and the previous large object is unlinked.
+//
+// Parameters:
+//   - ctx: Request context containing cancellation and configured AASX limits.
+//   - packageID: Unencoded package identifier to create or replace.
+//   - file: Caller-owned staged package; promotion transfers its large object into persistence.
+//   - aasIDs: Replacement AAS identifiers associated with the package.
+//   - fileName: Preferred replacement download filename.
+//
+// Returns:
+//   - bool: True when an existing package was replaced; false when one was created.
+//   - *PackageRecord: Persisted package metadata.
+//   - error: Validation, inspection, promotion, or database error.
+func (p *AASXFileServerDatabase) PutPackage(ctx context.Context, packageID string, file common.StagedUpload, aasIDs []string, fileName string) (bool, *PackageRecord, error) {
+	record, updated, err := p.putPackage(ctx, strings.TrimSpace(packageID), file, aasIDs, fileName, true)
+	if err != nil {
+		return false, nil, err
+	}
+	return updated, record, nil
+}
+
+func (p *AASXFileServerDatabase) putPackage(ctx context.Context, packageID string, file common.StagedUpload, aasIDs []string, fileName string, allowUpdate bool) (*PackageRecord, bool, error) {
+	if strings.TrimSpace(packageID) == "" {
+		return nil, false, common.NewErrBadRequest("AASXFS-PUTPACKAGE-EMPTYPACKAGEID packageId must not be empty")
+	}
+	if file == nil {
+		return nil, false, common.NewErrBadRequest("AASXFS-PUTPACKAGE-NILFILE package file must not be nil")
+	}
+
+	normalizedAASIDs := normalizeAASIDs(aasIDs)
+	resolvedFileName := normalizeFileName(fileName)
+	if err := validatePackageForUpload(file, common.AASXLimitsFromContext(ctx)); err != nil {
+		return nil, false, err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, false, common.NewInternalServerError("AASXFS-PUTPACKAGE-SEEK " + err.Error())
+	}
+
+	var record *PackageRecord
+	updated := false
+	err := file.Promote(ctx, func(ctx context.Context, tx *sql.Tx, newOID int64, _ int64) error {
+		var persistErr error
+		record, updated, persistErr = persistStagedPackage(ctx, tx, packageID, newOID, normalizedAASIDs, resolvedFileName, allowUpdate)
+		return persistErr
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return record, updated, nil
+}
+
+// authorizePackageUpsert enforces the right that the upsert actually needs.
+// The access decision is taken before the upload is staged, so the package
+// may have been created or deleted by someone else in the meantime: an
+// existing package needs UPDATE on that package, a new one the right to
+// create packages.
+func authorizePackageUpsert(ctx context.Context, tx *sql.Tx, packageDBID int64, exists bool) error {
+	if !exists {
+		if allowed, restricted := auth.ReBACOnlyCreateAllowed(ctx, auth.SemanticResourceAASXPackage); restricted && !allowed {
+			return common.NewErrDenied("AASXFS-PUTPACKAGE-CREATEDENIED creating this package is not allowed")
+		}
+		return nil
+	}
+	updateCtx := auth.SelectPutFormulaByExistence(ctx, true)
+	granted, restricted := auth.ReBACOnlyRowCondition(updateCtx, auth.SemanticResourceAASXPackage, goqu.I("aasx_package.auth_uuid"))
+	if !restricted {
+		return nil
+	}
+	query, args, err := goqu.Dialect("postgres").From("aasx_package").Select(goqu.L("1")).
+		Where(goqu.C("id").Eq(packageDBID), granted).Prepared(true).ToSQL()
+	if err != nil {
+		return common.NewInternalServerError("AASXFS-PUTPACKAGE-BUILDAUTHORIZE " + err.Error())
+	}
+	var marker int
+	err = tx.QueryRowContext(ctx, query, args...).Scan(&marker)
+	if errors.Is(err, sql.ErrNoRows) {
+		return common.NewErrDenied("AASXFS-PUTPACKAGE-UPDATEDENIED updating this package is not allowed")
+	}
+	if err != nil {
+		return common.NewInternalServerError("AASXFS-PUTPACKAGE-AUTHORIZE " + err.Error())
+	}
+	return nil
+}
+
+func persistStagedPackage(ctx context.Context, tx *sql.Tx, packageID string, newOID int64, aasIDs []string, fileName string, allowUpdate bool) (*PackageRecord, bool, error) {
+	dialect := goqu.Dialect("postgres")
+	selectSQL, selectArgs, err := dialect.From("aasx_package").Select("id", "file_oid", "file_name").
+		Where(goqu.C("package_id").Eq(packageID)).ForUpdate(exp.Wait).ToSQL()
+	if err != nil {
+		return nil, false, common.NewInternalServerError("AASXFS-PUTPACKAGE-BUILDSELECT " + err.Error())
+	}
+	var existingID, existingOID int64
+	var existingFileName string
+	scanErr := tx.QueryRowContext(ctx, selectSQL, selectArgs...).Scan(&existingID, &existingOID, &existingFileName)
+	exists := scanErr == nil
+	if scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
+		return nil, false, common.NewInternalServerError("AASXFS-PUTPACKAGE-SELECT " + scanErr.Error())
+	}
+	if exists && !allowUpdate {
+		return nil, false, common.NewErrConflict("AASXFS-PUTPACKAGE-CONFLICT packageId already exists")
+	}
+	if err = authorizePackageUpsert(ctx, tx, existingID, exists); err != nil {
+		return nil, false, err
+	}
+	if fileName == "" {
+		fileName = strings.TrimSpace(existingFileName)
+	}
+	if fileName == "" {
+		fileName = packageID + ".aasx"
+	}
+	stored := storedPackage{packageID: packageID, oid: newOID, fileName: fileName, aasIDs: aasIDs}
+	if exists {
+		record, updateErr := updateStagedPackageTx(ctx, tx, existingID, existingOID, stored)
+		return record, true, updateErr
+	}
+	record, insertErr := insertStagedPackageTx(ctx, tx, stored)
+	return record, false, insertErr
+}
+
+// storedPackage is the package state a staged upload promotes.
+type storedPackage struct {
+	packageID string
+	oid       int64
+	fileName  string
+	aasIDs    []string
+}
+
+func (p storedPackage) record(dbID int64) *PackageRecord {
+	return &PackageRecord{DBID: dbID, PackageID: p.packageID, FileName: p.fileName, AASIDs: p.aasIDs}
+}
+
+// updateStagedPackageTx swaps the content and metadata of an existing package
+// and unlinks its previous large object.
+func updateStagedPackageTx(ctx context.Context, tx *sql.Tx, existingID int64, existingOID int64, stored storedPackage) (*PackageRecord, error) {
+	query, args, err := goqu.Dialect("postgres").Update("aasx_package").Set(goqu.Record{
+		"file_oid": stored.oid, "file_name": stored.fileName, "content_type": PackageContentType,
+	}).Where(goqu.C("id").Eq(existingID)).ToSQL()
+	if err != nil {
+		return nil, common.NewInternalServerError("AASXFS-PUTPACKAGE-BUILDUPDATE " + err.Error())
+	}
+	if _, err = tx.ExecContext(ctx, query, args...); err != nil {
+		return nil, common.NewInternalServerError("AASXFS-PUTPACKAGE-UPDATE " + err.Error())
+	}
+	if err = replaceAASIDs(ctx, tx, existingID, stored.aasIDs); err != nil {
+		return nil, err
+	}
+	if err = binarycontent.UnlinkOIDTx(ctx, tx, existingOID); err != nil {
+		return nil, err
+	}
+	return stored.record(existingID), touchPackage(ctx, tx, stored.packageID, conditional.OpUpdate)
+}
+
+// insertStagedPackageTx inserts a new package.
+func insertStagedPackageTx(ctx context.Context, tx *sql.Tx, stored storedPackage) (*PackageRecord, error) {
+	query, args, err := goqu.Dialect("postgres").Insert("aasx_package").Rows(goqu.Record{
+		"package_id": stored.packageID, "file_oid": stored.oid, "file_name": stored.fileName, "content_type": PackageContentType,
+	}).Returning("id").ToSQL()
+	if err != nil {
+		return nil, common.NewInternalServerError("AASXFS-PUTPACKAGE-BUILDINSERT " + err.Error())
+	}
+	var newID int64
+	if err = tx.QueryRowContext(ctx, query, args...).Scan(&newID); err != nil {
+		if isUniqueViolation(err) {
+			return nil, common.NewErrConflict("AASXFS-PUTPACKAGE-CONFLICT packageId already exists")
+		}
+		return nil, common.NewInternalServerError("AASXFS-PUTPACKAGE-INSERT " + err.Error())
+	}
+	if err = insertPackageAASIDs(ctx, tx, stored.packageID, newID, stored.aasIDs); err != nil {
+		return nil, err
+	}
+	return stored.record(newID), touchPackage(ctx, tx, stored.packageID, conditional.OpCreate)
+}
+
+// touchPackage records that tx changes the revision of an AASX package. The
+// new revision is written when the transaction commits.
+func touchPackage(ctx context.Context, tx *sql.Tx, packageID string, op conditional.Operation) error {
+	if err := conditional.Touch(ctx, tx, conditional.Ref(conditional.KindAASXPackage, packageID), op); err != nil {
+		return common.NewInternalServerError("AASXFS-TOUCHPACKAGE-REVISION " + err.Error())
+	}
+	return nil
+}
+
+// GetPackageByID returns metadata and a streaming body for one package.
+//
+// The returned Content reader owns the read transaction. The caller must close
+// it on successful completion, copy failure, or request cancellation.
+//
+// Parameters:
+//   - ctx: Request context used for lookup, streaming, and cancellation.
+//   - packageID: Unencoded package identifier.
+//
+// Returns:
+//   - *PackageBinary: Metadata and caller-owned content stream.
+//   - error: Not-found, query, transaction, or large-object open error.
+func (p *AASXFileServerDatabase) GetPackageByID(ctx context.Context, packageID string) (*PackageBinary, error) {
+	tx, err := common.BeginReadTransaction(ctx, p.readDB(ctx))
+	if err != nil {
+		return nil, common.NewInternalServerError("AASXFS-GETPACKAGE-STARTTX " + err.Error())
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	dialect := goqu.Dialect("postgres")
+	query, args, err := dialect.From("aasx_package").
+		Select("id", "file_oid", "file_name").
+		Where(goqu.C("package_id").Eq(packageID)).
+		Prepared(true).
+		ToSQL()
+	if err != nil {
+		return nil, common.NewInternalServerError("AASXFS-GETPACKAGE-BUILDSQL " + err.Error())
+	}
+
+	var packageDBID int64
+	var fileOID int64
+	var fileName string
+	if err = tx.QueryRowContext(ctx, query, args...).Scan(&packageDBID, &fileOID, &fileName); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, common.NewErrNotFound("AASXFS-GETPACKAGE-NOTFOUND package not found")
+		}
+		return nil, common.NewInternalServerError("AASXFS-GETPACKAGE-QUERY " + err.Error())
+	}
+
+	aasIDs, err := p.getAASIDsTx(ctx, tx, packageDBID)
+	if err != nil {
+		return nil, err
+	}
+
+	content, err := binarycontent.OpenOIDTx(ctx, tx, fileOID)
+	if err != nil {
+		return nil, err
+	}
+	committed = true
+
+	return &PackageBinary{
+		PackageRecord: PackageRecord{
+			DBID:      packageDBID,
+			PackageID: packageID,
+			FileName:  fileName,
+			AASIDs:    aasIDs,
+		},
+		Content: content,
+	}, nil
+}
+
+// DeletePackageByID removes a package and unlinks its PostgreSQL large object.
+func (p *AASXFileServerDatabase) DeletePackageByID(ctx context.Context, packageID string) error {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return common.NewInternalServerError("AASXFS-DELETEPACKAGE-STARTTX " + err.Error())
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	dialect := goqu.Dialect("postgres")
+	selectSQL, selectArgs, err := dialect.From("aasx_package").
+		Select("id", "file_oid").
+		Where(goqu.C("package_id").Eq(packageID)).
+		ForUpdate(exp.Wait).
+		ToSQL()
+	if err != nil {
+		return common.NewInternalServerError("AASXFS-DELETEPACKAGE-BUILDSELECT " + err.Error())
+	}
+
+	var packageDBID int64
+	var fileOID int64
+	if err = tx.QueryRowContext(ctx, selectSQL, selectArgs...).Scan(&packageDBID, &fileOID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return common.NewErrNotFound("AASXFS-DELETEPACKAGE-NOTFOUND package not found")
+		}
+		return common.NewInternalServerError("AASXFS-DELETEPACKAGE-SELECT " + err.Error())
+	}
+
+	if err = auth.RecordReBACResourceDeleted(ctx, tx, auth.SemanticResourceAASXPackage, packageID); err != nil {
+		return err
+	}
+	deleteSQL, deleteArgs, err := dialect.Delete("aasx_package").
+		Where(goqu.C("id").Eq(packageDBID)).
+		ToSQL()
+	if err != nil {
+		return common.NewInternalServerError("AASXFS-DELETEPACKAGE-BUILDDELETE " + err.Error())
+	}
+	// #nosec G701 -- SQL is generated by goqu with fixed table/column names and bound arguments.
+	if _, err = tx.ExecContext(ctx, deleteSQL, deleteArgs...); err != nil {
+		return common.NewInternalServerError("AASXFS-DELETEPACKAGE-DELETE " + err.Error())
+	}
+
+	if err = binarycontent.UnlinkOIDTx(ctx, tx, fileOID); err != nil {
+		return err
+	}
+	if err = touchPackage(ctx, tx, packageID, conditional.OpDelete); err != nil {
+		return err
+	}
+
+	if err = common.CommitTransaction(tx); err != nil {
+		return common.CommitError("AASXFS-DELETEPACKAGE-COMMIT", err)
+	}
+	committed = true
+	return nil
+}
+
+func (p *AASXFileServerDatabase) getAASIDsTx(ctx context.Context, queryable interface {
+	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
+}, packageDBID int64) ([]string, error) {
+	dialect := goqu.Dialect("postgres")
+	query, args, err := dialect.From("aasx_package_aas_id").
+		Select("aas_id").
+		Where(goqu.C("package_db_id").Eq(packageDBID)).
+		Order(goqu.I("position").Asc()).
+		Prepared(true).
+		ToSQL()
+	if err != nil {
+		return nil, common.NewInternalServerError("AASXFS-GETAASIDS-BUILDSQL " + err.Error())
+	}
+
+	rows, err := queryable.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, common.NewInternalServerError("AASXFS-GETAASIDS-QUERY " + err.Error())
+	}
+	defer func() { _ = rows.Close() }()
+
+	aasIDs := make([]string, 0, 4)
+	for rows.Next() {
+		var aasID string
+		if scanErr := rows.Scan(&aasID); scanErr != nil {
+			return nil, common.NewInternalServerError("AASXFS-GETAASIDS-SCAN " + scanErr.Error())
+		}
+		aasIDs = append(aasIDs, aasID)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, common.NewInternalServerError("AASXFS-GETAASIDS-ROWS " + err.Error())
+	}
+
+	return aasIDs, nil
+}
+
+// insertPackageAASIDs stores the AAS identifiers of a new package and
+// records the access of its uploader.
+func insertPackageAASIDs(ctx context.Context, tx *sql.Tx, packageID string, packageDBID int64, aasIDs []string) error {
+	if err := replaceAASIDs(ctx, tx, packageDBID, aasIDs); err != nil {
+		return err
+	}
+	return auth.RecordReBACResourceCreated(ctx, tx, auth.SemanticResourceAASXPackage, packageID)
+}
+
+func replaceAASIDs(ctx context.Context, tx *sql.Tx, packageDBID int64, aasIDs []string) error {
+	dialect := goqu.Dialect("postgres")
+	deleteSQL, deleteArgs, err := dialect.Delete("aasx_package_aas_id").
+		Where(goqu.C("package_db_id").Eq(packageDBID)).
+		ToSQL()
+	if err != nil {
+		return common.NewInternalServerError("AASXFS-REPLACEAASIDS-BUILDDELETE " + err.Error())
+	}
+	//nolint:gosec // SQL is generated by goqu with fixed table/column names and bound arguments.
+	if _, err = tx.ExecContext(ctx, deleteSQL, deleteArgs...); err != nil {
+		return common.NewInternalServerError("AASXFS-REPLACEAASIDS-DELETE " + err.Error())
+	}
+
+	if len(aasIDs) == 0 {
+		return nil
+	}
+
+	records := make([]goqu.Record, 0, len(aasIDs))
+	for idx, aasID := range aasIDs {
+		records = append(records, goqu.Record{
+			"package_db_id": packageDBID,
+			"aas_id":        aasID,
+			"position":      idx,
+		})
+	}
+
+	insertSQL, insertArgs, err := dialect.Insert("aasx_package_aas_id").Rows(records).ToSQL()
+	if err != nil {
+		return common.NewInternalServerError("AASXFS-REPLACEAASIDS-BUILDINSERT " + err.Error())
+	}
+	// #nosec G701 -- SQL is generated by goqu with fixed table/column names and bound arguments.
+	if _, err = tx.ExecContext(ctx, insertSQL, insertArgs...); err != nil {
+		if isUniqueViolation(err) {
+			return common.NewErrConflict("AASXFS-REPLACEAASIDS-CONFLICT duplicate aasIds in request")
+		}
+		return common.NewInternalServerError("AASXFS-REPLACEAASIDS-INSERT " + err.Error())
+	}
+
+	return nil
+}
+
+func validatePackageForUpload(file io.ReadSeeker, limits common.AASXLimits) error {
+	if file == nil {
+		return common.NewErrBadRequest("AASXFS-VALIDATEPACKAGE-NILFILE package file must not be nil")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return common.NewInternalServerError("AASXFS-VALIDATEPACKAGE-SEEK " + err.Error())
+	}
+
+	err := validateAASXEnvironmentSpec(file, limits)
+	if errors.Is(err, aasx.ErrReaderLimitExceeded) {
+		return common.NewErrPayloadTooLarge("AASXFS-VALIDATEPACKAGE-AASXLIMIT " + err.Error())
+	}
+	if err != nil {
+		return common.NewErrBadRequest("AASXFS-VALIDATEPACKAGE-INVALIDAASX " + err.Error())
+	}
+	return nil
+}
+
+func validateAASXEnvironmentSpec(file io.ReadSeeker, limits common.AASXLimits) error {
+	packaging := aasx.NewPackaging()
+	packageReader, err := packaging.OpenReadFromStream(file, limits.ReaderOptions()...)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = packageReader.Close() }()
+
+	specs, err := packageReader.Specs()
+	if err != nil {
+		return err
+	}
+
+	if !hasSingleSpecFormat(specs) {
+		return errors.New("AASXFS-VALIDATEAASX-NOSINGLEFORMAT no unambiguous JSON/XML AASX spec found")
+	}
+	return nil
+}
+
+func hasSingleSpecFormat(specs []*aasx.Part) bool {
+	hasJSONSpec := false
+	hasXMLSpec := false
+	for _, spec := range specs {
+		hasJSONSpec = hasJSONSpec || aasxSpecLooksJSON(spec)
+		hasXMLSpec = hasXMLSpec || aasxSpecLooksXML(spec)
+	}
+	return hasJSONSpec != hasXMLSpec
+}
+
+func aasxSpecLooksJSON(specPart *aasx.Part) bool {
+	if specPart == nil {
+		return false
+	}
+	partPath := normalizeAASXPartPath(specPart)
+	contentType := strings.ToLower(strings.TrimSpace(specPart.ContentType))
+	return strings.HasSuffix(partPath, ".json") || strings.Contains(contentType, "json")
+}
+
+func aasxSpecLooksXML(specPart *aasx.Part) bool {
+	if specPart == nil {
+		return false
+	}
+	partPath := normalizeAASXPartPath(specPart)
+	contentType := strings.ToLower(strings.TrimSpace(specPart.ContentType))
+	return strings.HasSuffix(partPath, ".xml") || strings.Contains(contentType, "xml")
+}
+
+func normalizeAASXPartPath(specPart *aasx.Part) string {
+	if specPart == nil || specPart.URI == nil {
+		return ""
+	}
+
+	uriPath := strings.TrimSpace(specPart.URI.Path)
+	if uriPath == "" {
+		uriPath = strings.TrimSpace(specPart.URI.String())
+	}
+	return strings.ToLower(uriPath)
+}
+
+func normalizeAASIDs(aasIDs []string) []string {
+	seen := make(map[string]struct{}, len(aasIDs))
+	result := make([]string, 0, len(aasIDs))
+
+	for _, raw := range aasIDs {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
+	}
+
+	return result
+}
+
+func normalizeFileName(providedFileName string) string {
+	baseName := filepath.Base(strings.TrimSpace(providedFileName))
+	switch baseName {
+	case ".", "..", string(filepath.Separator):
+		return ""
+	}
+	return baseName
+}
+
+func isUniqueViolation(err error) bool {
+	return common.IsPostgresUniqueViolation(err)
+}
+
+// ParseCursorID parses a cursor string into a non-negative database identifier.
+func ParseCursorID(cursor string) (int64, error) {
+	trimmed := strings.TrimSpace(cursor)
+	if trimmed == "" {
+		return 0, nil
+	}
+
+	cursorID, err := strconv.ParseInt(trimmed, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid cursor %q: %w", trimmed, err)
+	}
+	if cursorID < 0 {
+		return 0, fmt.Errorf("invalid cursor %q: must be non-negative", trimmed)
+	}
+	return cursorID, nil
+}

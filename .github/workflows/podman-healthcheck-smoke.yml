@@ -1,0 +1,202 @@
+name: Podman Healthcheck Smoke
+
+on:
+  pull_request:
+    paths:
+      - 'cmd/**'
+      - 'database/**'
+      - 'internal/basyxconfigurationservice/**'
+      - 'internal/healthprobe/**'
+      - 'examples/BaSyxEventFeedExample/docker-compose.yml'
+      - 'examples/BaSyxMQTTExample/docker-compose.yml'
+      - 'examples/BaSyxKafkaExample/docker-compose.yml'
+      - 'examples/BaSyxAMQPExample/docker-compose.yml'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/podman-healthcheck-smoke.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/**'
+      - 'database/**'
+      - 'internal/basyxconfigurationservice/**'
+      - 'internal/healthprobe/**'
+      - 'examples/BaSyxEventFeedExample/docker-compose.yml'
+      - 'examples/BaSyxMQTTExample/docker-compose.yml'
+      - 'examples/BaSyxKafkaExample/docker-compose.yml'
+      - 'examples/BaSyxAMQPExample/docker-compose.yml'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/podman-healthcheck-smoke.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  podman-smoke:
+    name: Podman healthcheck smoke (${{ matrix.service_name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service_name: aasregistryservice
+            image_name: aasregistry-go
+            service_port: 8080
+          - service_name: aasenvironmentservice
+            image_name: aasenvironment-go
+            service_port: 8082
+    env:
+      SERVICE_NAME: ${{ matrix.service_name }}
+      IMAGE_NAME: ${{ matrix.image_name }}
+      CONFIG_IMAGE_NAME: basyxconfigurationservice-go
+      SERVICE_PORT: ${{ matrix.service_port }}
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+      POSTGRES_DB: basyxTestDB
+      POSTGRES_HOST: postgres-smoke
+      POSTGRES_PORT: 5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Ensure Podman is available
+        run: |
+          if ! command -v podman >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y podman
+          fi
+          podman --version
+
+      - name: Build image with Podman
+        run: |
+          podman build \
+            --format docker \
+            -t ${IMAGE_NAME}:podman-smoke \
+            -f ./cmd/${SERVICE_NAME}/Dockerfile \
+            .
+          podman build \
+            --format docker \
+            -t ${CONFIG_IMAGE_NAME}:podman-smoke \
+            -f ./cmd/basyxconfigurationservice/Dockerfile \
+            .
+
+      - name: Run DB + service and verify healthchecks
+        run: |
+          set -euo pipefail
+
+          cleanup() {
+            podman rm -f service-smoke config-smoke postgres-smoke >/dev/null 2>&1 || true
+            podman network rm basyx-smoke >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          podman network create basyx-smoke
+
+          podman run -d --name postgres-smoke --network basyx-smoke \
+            -e POSTGRES_USER=${POSTGRES_USER} \
+            -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD} \
+            -e POSTGRES_DB=${POSTGRES_DB} \
+            postgres:18
+
+          for i in $(seq 1 30); do
+            if podman exec postgres-smoke pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} >/dev/null 2>&1; then
+              echo "Postgres is ready"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "Postgres did not become ready in time"
+              podman logs postgres-smoke || true
+              exit 1
+            fi
+            sleep 2
+          done
+
+          podman run --name config-smoke --network basyx-smoke \
+            -e POSTGRES_HOST=${POSTGRES_HOST} \
+            -e POSTGRES_PORT=${POSTGRES_PORT} \
+            -e POSTGRES_USER=${POSTGRES_USER} \
+            -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD} \
+            -e POSTGRES_DBNAME=${POSTGRES_DB} \
+            -e POSTGRES_MAXOPENCONNECTIONS=50 \
+            -e POSTGRES_MAXIDLECONNECTIONS=50 \
+            -e POSTGRES_CONNMAXLIFETIMEMINUTES=5 \
+            ${CONFIG_IMAGE_NAME}:podman-smoke
+
+          config_exit_code="$(podman inspect config-smoke --format '{{.State.ExitCode}}')"
+          if [ "${config_exit_code}" != "0" ]; then
+            echo "Configuration service failed with exit code ${config_exit_code}"
+            podman logs config-smoke || true
+            exit 1
+          fi
+
+          podman run -d --name service-smoke --network basyx-smoke \
+            -e SERVER_PORT=${SERVICE_PORT} \
+            -e CORS_ALLOWEDORIGINS='*' \
+            -e CORS_ALLOWEDHEADERS='*' \
+            -e CORS_ALLOWCREDENTIALS=true \
+            -e CORS_ALLOWEDMETHODS='GET,POST,PUT,PATCH,DELETE,OPTIONS' \
+            -e POSTGRES_HOST=${POSTGRES_HOST} \
+            -e POSTGRES_PORT=${POSTGRES_PORT} \
+            -e POSTGRES_USER=${POSTGRES_USER} \
+            -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD} \
+            -e POSTGRES_DBNAME=${POSTGRES_DB} \
+            -e POSTGRES_MAXOPENCONNECTIONS=50 \
+            -e POSTGRES_MAXIDLECONNECTIONS=50 \
+            -e POSTGRES_CONNMAXLIFETIMEMINUTES=5 \
+            -e ABAC_ENABLED=false \
+            ${IMAGE_NAME}:podman-smoke
+
+          echo "--- image healthcheck metadata ---"
+          podman inspect ${IMAGE_NAME}:podman-smoke --format '{{json .Config.Healthcheck}}' || true
+          echo "--- container healthcheck metadata ---"
+          podman inspect service-smoke --format '{{json .Config.Healthcheck}}' || true
+
+          for i in $(seq 1 45); do
+            if podman healthcheck run service-smoke >/dev/null 2>&1; then
+              echo "Image healthcheck passed under Podman"
+              break
+            fi
+            if [ "$i" -eq 45 ]; then
+              echo "Image healthcheck did not pass in time"
+              echo "--- podman inspect health state ---"
+              podman inspect service-smoke --format '{{json .State.Health}}' || true
+              echo "--- manual image healthcheck command output ---"
+              podman exec service-smoke /bin/healthprobe --debug || true
+              echo "--- compose-style wget command output ---"
+              podman exec service-smoke /bin/wget --quiet --tries=1 --output-document=- http://127.0.0.1:${SERVICE_PORT}/health >/dev/null || true
+              podman logs service-smoke || true
+              exit 1
+            fi
+            sleep 2
+          done
+
+          podman exec service-smoke /bin/wget --quiet --tries=1 --output-document=- http://127.0.0.1:${SERVICE_PORT}/health >/dev/null
+          echo "Compose-style wget healthcheck command works under Podman"
+
+          if [ "${SERVICE_NAME}" = "aasenvironmentservice" ]; then
+            python3 - <<'PYCODE'
+          import json
+          import subprocess
+
+          examples = (
+              "BaSyxEventFeedExample",
+              "BaSyxMQTTExample",
+              "BaSyxKafkaExample",
+              "BaSyxAMQPExample",
+          )
+          for example in examples:
+              compose_file = f"examples/{example}/docker-compose.yml"
+              config = subprocess.check_output(
+                  ["docker", "compose", "-f", compose_file, "config", "--format", "json"],
+                  text=True,
+              )
+              services = json.loads(config)["services"]
+              command = services["aas-environment"]["healthcheck"]["test"]
+              if command[0] != "CMD":
+                  raise RuntimeError(f"{example}: healthcheck must use exec form")
+              subprocess.run(["podman", "exec", "service-smoke", *command[1:]], check=True)
+              print(f"{example}: declared healthcheck passed under Podman")
+          PYCODE
+          fi

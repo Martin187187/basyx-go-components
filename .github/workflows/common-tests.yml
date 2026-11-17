@@ -7,6 +7,8 @@ on:
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/common-tests.yml'
+      - '**.sql'
+      - 'internal/common/**/*.json'
   push:
     branches: [main]
     paths:
@@ -14,6 +16,11 @@ on:
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/common-tests.yml'
+      - '**.sql'
+      - 'internal/common/**/*.json'
+
+permissions:
+  contents: read
 
 jobs:
   common-tests:
@@ -21,22 +28,64 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
-        uses: actions/checkout@v5
-        
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           # Use the version in go.mod if present; otherwise pin a version
           go-version-file: go.mod
           cache: true
-          
+
       - name: Get dependencies
         run: go mod download
-        
+
+      - name: Run common root package tests
+        run: go test -count=1 -v -cover ./internal/common
+
+      - name: Run common async job tests
+        run: go test -count=1 -v -cover ./internal/common/asyncjob
+
+      - name: Run common builder tests
+        run: go test -count=1 -v -cover ./internal/common/builder
+
+      - name: Run common descriptor tests
+        run: go test -count=1 -v -cover ./internal/common/descriptors
+
+      - name: Run shared eventing and transport tests
+        run: |
+          go clean -testcache
+          go test -v ./internal/common/events ./internal/common/eventfeed ./internal/common/eventoutbox ./internal/common/mqtt ./internal/common/kafka ./internal/common/amqp ./internal/common/brokersecurity ./internal/common/eventfeedsetup
+
+      - name: Run common history tests
+        run: go test -count=1 -v -cover ./internal/common/history
+
+      - name: Run common JWS tests
+        run: go test -count=1 -v -cover ./internal/common/jws
+
+      - name: Run common model tests
+        run: go test -count=1 -v -cover ./internal/common/model
+
+      - name: Run common security tests
+        run: go test -count=1 -v -cover ./internal/common/security
+
       - name: Run common model grammar tests
-        run: go test github.com/eclipse-basyx/basyx-go-components/internal/common/model/grammar -v -cover
-        
+        run: go test github.com/eclipse-basyx/basyx-go-components/internal/common/model/grammar -count=1 -v -cover
+
       - name: Run common security model tests
         run: |
-          cd internal/common/security/model/unit_tests
-          go test -v -cover
+          cd internal/common/security/unit_tests/model
+          go test -count=1 -v -cover
+
+      - name: Run common security abac engine tests
+        run: |
+          cd internal/common/security/unit_tests/abac_engine
+          go test -count=1 -v -cover
+
+      - name: Run common security filter tests
+        run: |
+          cd internal/common/security/unit_tests/filter_abac_engine
+          go test -count=1 -v -cover
+
+      - name: Run common test environment tests
+        run: go test -count=1 -v -cover ./internal/common/testenv

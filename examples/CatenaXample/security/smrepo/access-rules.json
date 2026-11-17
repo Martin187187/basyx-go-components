@@ -1,0 +1,278 @@
+{
+  "AllAccessPermissionRules": {
+    "DEFATTRIBUTES": [
+      {
+        "name": "user",
+        "attributes": [
+          {
+            "CLAIMPATH": "/role"
+          }
+        ]
+      },
+      {
+        "name": "anonymous",
+        "attributes": [
+          {
+            "GLOBAL": "ANONYMOUS"
+          }
+        ]
+      }
+    ],
+    "DEFOBJECTS": [
+      {
+        "name": "all_routes",
+        "objects": [
+          {
+            "ROUTE": "*"
+          }
+        ]
+      },
+      {
+        "name": "description",
+        "objects": [
+          {
+            "ROUTE": "/description"
+          }
+        ]
+      },
+      {
+        "name": "submodel_routes",
+        "objects": [
+          {
+            "ROUTE": "/submodels"
+          },
+          {
+            "ROUTE": "/submodels/*"
+          },
+          {
+            "ROUTE": "/submodels/*/submodel-elements"
+          },
+          {
+            "ROUTE": "/submodels/*/submodel-elements/*"
+          },
+          {
+            "ROUTE": "/query/submodels"
+          }
+        ]
+      }
+    ],
+    "DEFACLS": [
+      {
+        "name": "public_read",
+        "acl": {
+          "USEATTRIBUTES": "anonymous",
+          "RIGHTS": [
+            "READ"
+          ],
+          "ACCESS": "ALLOW"
+        }
+      },
+      {
+        "name": "read",
+        "acl": {
+          "USEATTRIBUTES": "user",
+          "RIGHTS": [
+            "READ"
+          ],
+          "ACCESS": "ALLOW"
+        }
+      },
+      {
+        "name": "write",
+        "acl": {
+          "USEATTRIBUTES": "user",
+          "RIGHTS": [
+            "CREATE",
+            "UPDATE",
+            "DELETE"
+          ],
+          "ACCESS": "ALLOW"
+        }
+      }
+    ],
+    "DEFFORMULAS": [
+      {
+        "name": "always_true",
+        "formula": {
+          "$boolean": true
+        }
+      },
+      {
+        "name": "data_provider",
+        "formula": {
+          "$eq": [
+            {
+              "$attribute": {
+                "CLAIMPATH": "/role"
+              }
+            },
+            {
+              "$strVal": "data_provider"
+            }
+          ]
+        }
+      },
+      {
+        "name": "submodel_bpn_or_public",
+        "formula": {
+          "$or": [
+            {
+              "$eq": [
+                {
+                  "$attribute": {
+                    "CLAIM": "Edc-Bpn"
+                  }
+                },
+                {
+                  "$field": "$sm#supplementalSemanticIds[].keys[].value"
+                }
+              ]
+            },
+            {
+              "$eq": [
+                {
+                  "$strVal": "PUBLIC_READABLE"
+                },
+                {
+                  "$field": "$sm#supplementalSemanticIds[].keys[].value"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "name": "authenticated_submodel_bpn_or_public",
+        "formula": {
+          "$and": [
+            {
+              "$or": [
+                {
+                  "$eq": [
+                    {
+                      "$attribute": {
+                        "CLAIMPATH": "/role"
+                      }
+                    },
+                    {
+                      "$strVal": "edc_user"
+                    }
+                  ]
+                },
+                {
+                  "$eq": [
+                    {
+                      "$attribute": {
+                        "CLAIMPATH": "/role"
+                      }
+                    },
+                    {
+                      "$strVal": "user"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "$or": [
+                {
+                  "$eq": [
+                    {
+                      "$attribute": {
+                        "CLAIM": "Edc-Bpn"
+                      }
+                    },
+                    {
+                      "$field": "$sm#supplementalSemanticIds[].keys[].value"
+                    }
+                  ]
+                },
+                {
+                  "$eq": [
+                    {
+                      "$strVal": "PUBLIC_READABLE"
+                    },
+                    {
+                      "$field": "$sm#supplementalSemanticIds[].keys[].value"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "name": "submodel_bpn_or_public_filter",
+        "formula": {
+          "$or": [
+            {
+              "$eq": [
+                {
+                  "$attribute": {
+                    "CLAIM": "Edc-Bpn"
+                  }
+                },
+                {
+                  "$field": "$sm#supplementalSemanticIds[].keys[].value"
+                }
+              ]
+            },
+            {
+              "$eq": [
+                {
+                  "$strVal": "PUBLIC_READABLE"
+                },
+                {
+                  "$field": "$sm#supplementalSemanticIds[].keys[].value"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "rules": [
+      {
+        "USEACL": "public_read",
+        "USEOBJECTS": [
+          "description"
+        ],
+        "USEFORMULA": "always_true"
+      },
+      {
+        "USEACL": "read",
+        "USEOBJECTS": [
+          "submodel_routes"
+        ],
+        "USEFORMULA": "data_provider"
+      },
+      {
+        "USEACL": "write",
+        "USEOBJECTS": [
+          "all_routes"
+        ],
+        "USEFORMULA": "data_provider"
+      },
+      {
+        "USEACL": "read",
+        "USEOBJECTS": [
+          "submodel_routes"
+        ],
+        "USEFORMULA": "authenticated_submodel_bpn_or_public",
+        "FILTERLIST": [
+          {
+            "FRAGMENT": "$sm#supplementalSemanticIds[]",
+            "USEFORMULA": "submodel_bpn_or_public_filter",
+            "MATCH": true
+          },
+          {
+            "FRAGMENT": "$sm#supplementalSemanticIds[].keys[]",
+            "USEFORMULA": "submodel_bpn_or_public_filter",
+            "MATCH": true
+          }
+        ]
+      }
+    ]
+  }
+}

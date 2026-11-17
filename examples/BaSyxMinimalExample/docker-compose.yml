@@ -1,111 +1,81 @@
 services:
-  aas-env:
+  aas-environment:
     container_name: aas-environment
-    image: eclipsebasyx/aas-environment:2.0.0-SNAPSHOT
-    volumes:
-      - ./basyx/aas-env.properties:/application/application.properties
-      - ./aas:/application/aas
+    image: eclipsebasyx/aasenvironment-go:SNAPSHOT
+    pull_policy: always
+    command: ["/app/aasenvironmentservice"]
     ports:
-        - 8081:8081
-    depends_on:
-        aas-registry:
-            condition: service_healthy
-        sm-registry:
-            condition: service_healthy
-        aas-discovery:
-            condition: service_healthy
-            
-  aas-registry:
-    container_name: aas-registry
-    image: eclipsebasyx/aasregistry-go:SNAPSHOT
-    ports:
-      - 8082:8080
+      - "8082:8082"
     environment:
-      - SERVER_PORT=8080
+      - SERVER_PORT=8082
+      - CORS_ALLOWEDORIGINS=*
+      - CORS_ALLOWEDHEADERS=*
+      - CORS_ALLOWCREDENTIALS=true
+      - CORS_ALLOWEDMETHODS=GET,POST,PUT,PATCH,DELETE,OPTIONS
       - POSTGRES_HOST=db
       - POSTGRES_PORT=5432
       - POSTGRES_USER=admin
       - POSTGRES_PASSWORD=admin123
       - POSTGRES_DBNAME=basyxTestDB
-      - POSTGRES_MAXOPENCONNECTIONS=500
-      - POSTGRES_MAXIDLECONNECTIONS=500
+      - POSTGRES_MAXOPENCONNECTIONS=50
+      - POSTGRES_MAXIDLECONNECTIONS=25
       - POSTGRES_CONNMAXLIFETIMEMINUTES=5
+      - POSTGRES_CONNMAXIDLETIMEMINUTES=0
+      - JWS_PRIVATEKEYPATH=/app/rsa-key.pem
       - ABAC_ENABLED=false
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--output-document=-", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    depends_on:
-      db:
-        condition: service_healthy
-    
-  sm-registry:
-    container_name: sm-registry
-    image: eclipsebasyx/submodel-registry-log-mem:2.0.0-SNAPSHOT
-    ports:
-      - 8083:8080
+      - GENERAL_AASREGISTRYINTEGRATION=true
+      - GENERAL_SUBMODELREGISTRYINTEGRATION=true
+      - GENERAL_EXTERNALURL=http://localhost:8082
+      - GENERAL_AAS_PRECONFIG_PATHS=/app/preconfiguration
     volumes:
-      - ./basyx/sm-registry.yml:/workspace/config/application.yml
-
-  aas-discovery:
-    container_name: aas-discovery
-    image: eclipsebasyx/aasdiscovery-go:SNAPSHOT
-    environment:
-      - SERVER_PORT=8081
-      - POSTGRES_HOST=db
-      - POSTGRES_PORT=5432
-      - POSTGRES_USER=admin
-      - POSTGRES_PASSWORD=admin123
-      - POSTGRES_DBNAME=basyxTestDB
-      - POSTGRES_MAXOPENCONNECTIONS=500
-      - POSTGRES_MAXIDLECONNECTIONS=500
-      - POSTGRES_CONNMAXLIFETIMEMINUTES=5
-      - ABAC_ENABLED=false
-    ports:
-      - "8084:8081"
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--output-document=-", "http://localhost:8081/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+      - ./basyx/rsa-key.pem:/app/rsa-key.pem:ro
+      - ./aas:/app/preconfiguration:ro
     depends_on:
-      db:
-        condition: service_healthy
+      basyx_configuration:
+        condition: service_completed_successfully
+    restart: unless-stopped
 
-      
   aas-ui:
     container_name: aas-web-ui
     image: eclipsebasyx/aas-gui:SNAPSHOT
+    pull_policy: always
     ports:
       - "3000:3000"
+    volumes:
+      - ./basyx-infra.yml:/basyx-infra.yml:ro
     environment:
-      AAS_REGISTRY_PATH: "http://localhost:8082/shell-descriptors"
-      SUBMODEL_REGISTRY_PATH: "http://localhost:8083/submodel-descriptors"
-      AAS_DISCOVERY_PATH: "http://localhost:8084/lookup/shells"
-      AAS_REPO_PATH: "http://localhost:8081/shells"
-      SUBMODEL_REPO_PATH: "http://localhost:8081/submodels"
-      CD_REPO_PATH: "http://localhost:8081/concept-descriptions"
-    restart: always
-    depends_on:
-      aas-env:
-        condition: service_healthy
+      - ENDPOINT_CONFIG_AVAILABLE=false
+    restart: unless-stopped
 
   # PostgreSQL database
   db:
     container_name: postgres_db
-    image: postgres:15
+    image: postgres:18
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: admin123
       POSTGRES_DB: basyxTestDB
-    ports:
-      - "5432:5432"
     command: ["postgres", "-c", "listen_addresses=*"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin -d basyxTestDB"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+
+  basyx_configuration:
+    container_name: basyx_configuration
+    image: eclipsebasyx/basyxconfigurationservice-go:SNAPSHOT
+    environment:
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=admin123
+      - POSTGRES_DBNAME=basyxTestDB
+      - POSTGRES_MAXOPENCONNECTIONS=50
+      - POSTGRES_MAXIDLECONNECTIONS=25
+      - POSTGRES_CONNMAXLIFETIMEMINUTES=5
+      - POSTGRES_CONNMAXIDLETIMEMINUTES=0
+    depends_on:
+      db:
+        condition: service_healthy

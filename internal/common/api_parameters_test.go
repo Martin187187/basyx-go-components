@@ -1,0 +1,199 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
+package common
+
+import (
+	"context"
+	"encoding/base64"
+	"math"
+	"net/url"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/pagination"
+)
+
+func TestDecodeAPIString(t *testing.T) {
+	for _, value := range []string{"a", "ab", "urn:example:abc", "Grüße 世界", "\t\n"} {
+		for _, encoding := range []*base64.Encoding{base64.RawURLEncoding, base64.URLEncoding} {
+			got, err := DecodeAPIString(encoding.EncodeToString([]byte(value)))
+			if err != nil || got != value {
+				t.Fatalf("round trip %q: %q, %v", value, got, err)
+			}
+		}
+	}
+	for _, input := range []string{"", "YQ=", "YQ===", "Y=Q=", "YR==", "Y+Q", "Y/Q", "YQ\n", "YQ\r", "YQ==\n", " YQ", "YQ ", "a", "YR", "_w", "_w=="} {
+		t.Run(input, func(t *testing.T) {
+			if _, err := DecodeAPIString(input); err == nil {
+				t.Fatal("accepted malformed parameter")
+			}
+		})
+	}
+	if value, err := DecodeString("YQ=="); err != nil || value != "a" {
+		t.Fatal("legacy binary codec changed")
+	}
+}
+
+func TestParseAPILimitAppliesConfiguredPolicy(t *testing.T) {
+	ctx := ContextWithConfig(context.Background(), &Config{Server: ServerConfig{Pagination: PaginationConfig{DefaultLimit: 25, MaxLimit: 50}}})
+	if value, err := ParseAPILimit(ctx, url.Values{}); err != nil || value != 25 {
+		t.Fatalf("omitted limit = %d, %v", value, err)
+	}
+	for _, input := range []string{"", "0", "-1", "abc", "1.5", "2147483648", "51"} {
+		if _, err := ParseAPILimit(ctx, url.Values{"limit": {input}}); err == nil {
+			t.Fatalf("accepted limit %q", input)
+		}
+	}
+	for input, want := range map[string]int32{"1": 1, "25": 25, "50": 50} {
+		if value, err := ParseAPILimit(ctx, url.Values{"limit": {input}}); err != nil || value != want {
+			t.Fatalf("limit %q = %d, %v", input, value, err)
+		}
+	}
+}
+
+func TestParseAPILimitRejectsLimitsWithoutLookaheadRoom(t *testing.T) {
+	ctx := ContextWithConfig(context.Background(), &Config{Server: ServerConfig{Pagination: PaginationConfig{DefaultLimit: 100, MaxLimit: pagination.MaxSupportedLimit}}})
+	if value, err := ParseAPILimit(ctx, url.Values{"limit": {strconv.Itoa(pagination.MaxSupportedLimit)}}); err != nil || value != pagination.MaxSupportedLimit {
+		t.Fatalf("limit at the supported maximum = %d, %v", value, err)
+	}
+	if _, err := ParseAPILimit(ctx, url.Values{"limit": {strconv.Itoa(math.MaxInt32)}}); err == nil {
+		t.Fatal("accepted limit whose lookahead row overflows int32")
+	}
+}
+
+func TestParseAPILimitFallsBackToBuiltInDefaults(t *testing.T) {
+	ctx := context.Background()
+	if value, err := ParseAPILimit(ctx, url.Values{}); err != nil || int(value) != DefaultConfig.ServerPaginationDefaultLimit {
+		t.Fatalf("omitted limit = %d, %v", value, err)
+	}
+	if _, err := ParseAPILimit(ctx, url.Values{"limit": {strconv.Itoa(DefaultConfig.ServerPaginationMaxLimit)}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseAPILimit(ctx, url.Values{"limit": {strconv.Itoa(DefaultConfig.ServerPaginationMaxLimit + 1)}}); err == nil {
+		t.Fatal("accepted limit above built-in maximum")
+	}
+}
+
+func TestAPIPaginationPresence(t *testing.T) {
+	if _, err := ParseAPICursor(url.Values{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseAPICursor(url.Values{"cursor": {""}}); err == nil {
+		t.Fatal("accepted present empty cursor")
+	}
+	token := EncodeString("urn:next")
+	if got, err := ParseAPICursor(url.Values{"cursor": {token}}); err != nil || got != token {
+		t.Fatal("controller altered cursor")
+	}
+	if got := APIPagingMetadata("urn:next").Cursor; got != token {
+		t.Fatal("wrong next cursor")
+	}
+	if got := APIPagingMetadata("").Cursor; got != "" {
+		t.Fatal("terminal cursor")
+	}
+}
+
+func TestDecodeAPIPaginationReturnsBackendCursor(t *testing.T) {
+	if got, _, err := DecodeAPIPagination(1, ""); err != nil || got != "" {
+		t.Fatalf("first page cursor = %q, err = %v", got, err)
+	}
+	if got, _, err := DecodeAPIPagination(1, EncodeString("urn:next")); err != nil || got != "urn:next" {
+		t.Fatalf("decoded cursor = %q, err = %v", got, err)
+	}
+	if _, detail, err := DecodeAPIPagination(-1, ""); err == nil || detail != "BadLimit" {
+		t.Fatalf("negative limit detail = %q, err = %v", detail, err)
+	}
+	if _, detail, err := DecodeAPIPagination(1, "not base64!"); err == nil || detail != "BadCursor" {
+		t.Fatalf("malformed cursor detail = %q, err = %v", detail, err)
+	}
+}
+
+func TestAPIReferenceFilters(t *testing.T) {
+	valid := `{ "keys": [{"value":"urn:semantic", "type":"GlobalReference"}],
+ "type": "ExternalReference" }`
+	if _, err := DecodeAPIReference(EncodeString(valid), 3072); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{"null", "[]", `"urn:semantic"`, "{", `{}`, `{"type":"ExternalReference","keys":[]}`, `{"type":"ExternalReference","keys":[{"type":"GlobalReference","value":""}]}`} {
+		if _, err := DecodeAPIReference(EncodeString(value), 3072); err == nil {
+			t.Fatalf("accepted %s", value)
+		}
+	}
+	if _, err := DecodeAPIReference(EncodeString(valid), 1); err == nil {
+		t.Fatal("ignored length bound")
+	}
+}
+
+func TestAPISpecificAssetIDFilters(t *testing.T) {
+	if _, err := DecodeAPISpecificAssetID(EncodeString(`{"value":"asset", "name":"serial"}`)); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{"null", "[]", `{}`, `{"name":"serial"}`, `{"name":"","value":"asset"}`} {
+		if _, err := DecodeAPISpecificAssetID(EncodeString(value)); err == nil {
+			t.Fatalf("accepted %s", value)
+		}
+	}
+}
+
+func TestAPIUnicodeCharacterBounds(t *testing.T) {
+	name := strings.Repeat("é", 64)
+	value := strings.Repeat("中", 700)
+	asset := `{"name":"` + name + `","value":"` + value + `"}`
+	if _, err := DecodeAPISpecificAssetID(EncodeString(asset)); err != nil {
+		t.Fatal(err)
+	}
+	reference := `{"type":"ExternalReference","keys":[{"type":"GlobalReference","value":"` + value + `"}]}`
+	if _, err := DecodeAPIReference(EncodeString(reference), 3072); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeAPIIdentifier(EncodeString(strings.Repeat("é", 2048))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeAPIIdentifier(EncodeString(strings.Repeat("é", 2049))); err == nil {
+		t.Fatal("oversized identifier accepted")
+	}
+	for _, value := range []string{"\x00", "\uffff"} {
+		if _, err := DecodeAPIIdentifier(EncodeString(value)); err == nil {
+			t.Fatal("invalid XML character accepted")
+		}
+	}
+}
+
+func TestAPIEncodedReferenceLengthBoundary(t *testing.T) {
+	reference := `{"type":"ExternalReference","keys":[{"type":"GlobalReference","value":"urn:test"}]}`
+	reference += strings.Repeat(" ", 2304-len(reference))
+	encoded := EncodeString(reference)
+	if len(encoded) != 3072 {
+		t.Fatal("fixture length")
+	}
+	if _, err := DecodeAPIReference(encoded, 3072); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeAPIReference(EncodeString(reference+" "), 3072); err == nil {
+		t.Fatal("oversized parameter accepted")
+	}
+}

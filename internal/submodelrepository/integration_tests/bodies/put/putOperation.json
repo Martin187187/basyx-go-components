@@ -1,0 +1,34 @@
+{
+    "modelType": "Operation",
+    "idShort": "DemoOperation",
+    "inputVariables": [
+        {
+            "value": {
+                "idShort": "InputValue",
+                "modelType": "Property",
+                "valueType": "xs:string",
+                "value": "Test"
+            }
+        }
+    ],
+    "outputVariables": [
+        {
+            "value": {
+                "idShort": "OutputValue",
+                "modelType": "Property",
+                "valueType": "xs:string",
+                "value": "Test_Out"
+            }
+        }
+    ],
+    "inoutputVariables": [
+        {
+            "value": {
+                "idShort": "InoutputValue",
+                "modelType": "Property",
+                "valueType": "xs:string",
+                "value": "Test_InOut"
+            }
+        }
+    ]
+}

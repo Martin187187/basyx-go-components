@@ -1,16 +1,45 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+// Author: Martin Stemmer ( Fraunhofer IESE )
+
 package descriptors
 
 import (
-    "context"
-    "database/sql"
-    "encoding/json"
-    "fmt"
+	"context"
+	"encoding/json"
+	"log/slog"
+	"time"
 
-    "github.com/doug-martin/goqu/v9"
-    // nolint:revive
-    _ "github.com/doug-martin/goqu/v9/dialect/postgres"
-    "github.com/eclipse-basyx/basyx-go-components/internal/common/model"
-    "github.com/lib/pq"
+	"github.com/doug-martin/goqu/v9"
+	// nolint:revive
+	_ "github.com/doug-martin/goqu/v9/dialect/postgres"
+	"github.com/doug-martin/goqu/v9/exp"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model/grammar"
+	auth "github.com/eclipse-basyx/basyx-go-components/internal/common/security"
 )
 
 // ReadEndpointsByDescriptorID returns all endpoints that belong to a single
@@ -28,10 +57,11 @@ import (
 // JSON decoding failures) and are returned verbatim.
 func ReadEndpointsByDescriptorID(
 	ctx context.Context,
-	db *sql.DB,
+	db DBQueryer,
 	descriptorID int64,
+	joinOnMainTable string,
 ) ([]model.Endpoint, error) {
-	v, err := ReadEndpointsByDescriptorIDs(ctx, db, []int64{descriptorID})
+	v, err := ReadEndpointsByDescriptorIDs(ctx, db, []int64{descriptorID}, joinOnMainTable)
 	return v[descriptorID], err
 }
 
@@ -43,88 +73,102 @@ func ReadEndpointsByDescriptorID(
 // without querying the database.
 //
 // Result semantics and ordering:
-// - Endpoints are ordered by descriptor_id ASC, then endpoint id ASC.
-// - Protocol versions are aggregated per-endpoint and ordered by version row id.
-// - Security attributes are aggregated per-endpoint and ordered by attribute row id.
-// - Nullable text columns are COALESCE'd to empty strings; arrays default to empty.
+//   - Endpoints are ordered by position ASC.
+//   - Protocol versions and security attributes are stored as JSONB arrays on the
+//     endpoint row and are decoded per endpoint.
+//   - Nullable text columns are COALESCE'd to empty strings; JSON arrays default to empty.
 //
 // Implementation notes:
-// - Uses pq.Array with SQL ANY for efficient multi-key filtering.
-// - Uses LEFT JOINs so endpoints without versions or security attributes are still returned.
-// - Prepared statements are enabled via goqu to allow DB plan caching.
+//   - Uses a typed PostgreSQL array parameter with prepared Goqu rendering for
+//     stable, efficient multi-key filtering.
+//   - Uses LEFT JOINs so descriptors without endpoints are still handled.
+//   - Prepared statements are enabled via goqu to allow DB plan caching.
 //
 // Errors may occur while building the SQL statement, executing the query,
 // scanning columns, or decoding the aggregated JSON payload of security
 // attributes.
 func ReadEndpointsByDescriptorIDs(
 	ctx context.Context,
-	db *sql.DB,
+	db DBQueryer,
 	descriptorIDs []int64,
+	joinOnMainTable string,
 ) (map[int64][]model.Endpoint, error) {
+	if debugEnabled(ctx) {
+		defer func(start time.Time) {
+			slog.DebugContext(ctx, "descriptor endpoint read completed", "duration", time.Since(start))
+		}(time.Now())
+	}
 	out := make(map[int64][]model.Endpoint, len(descriptorIDs))
 	if len(descriptorIDs) == 0 {
 		return out, nil
 	}
 
-    d := goqu.Dialect(dialect)
-    arr := pq.Array(descriptorIDs)
+	d := goqu.Dialect(common.Dialect)
 
-    e := goqu.T(tblAASDescriptorEndpoint).As("e")
-    v := goqu.T(tblEndpointProtocolVersion).As("v")
-    s := goqu.T(tblSecurityAttributes).As("s")
+	ds := d.From(common.TDescriptor)
+	var joinOn exp.AliasedExpression
+	switch joinOnMainTable {
+	case "aas":
+		joinOn = aasDescriptorEndpointAlias
+		ds = ds.InnerJoin(
+			common.TAASDescriptor,
+			goqu.On(common.TAASDescriptor.Col(common.ColDescriptorID).Eq(common.TDescriptor.Col(common.ColID))),
+		)
+		ds = ds.LeftJoin(
+			aasDescriptorEndpointAlias,
+			goqu.On(aasDescriptorEndpointAlias.Col(common.ColDescriptorID).Eq(common.TDescriptor.Col(common.ColID))),
+		)
+	case "submodel":
+		joinOn = submodelDescriptorEndpointAlias
+		ds = ds.InnerJoin(
+			submodelDescriptorAlias,
+			goqu.On(submodelDescriptorAlias.Col(common.ColDescriptorID).Eq(common.TDescriptor.Col(common.ColID))),
+		).LeftJoin(
+			submodelDescriptorEndpointAlias,
+			goqu.On(submodelDescriptorEndpointAlias.Col(common.ColDescriptorID).Eq(submodelDescriptorAlias.Col(common.ColDescriptorID))),
+		)
+		ds = joinSubmodelDescriptorOwningAASDescriptor(ds)
+	case "company":
+		joinOn = companyDescriptorEndpointAlias
+		ds = ds.InnerJoin(
+			common.TCompanyDescriptor,
+			goqu.On(common.TCompanyDescriptor.Col(common.ColDescriptorID).Eq(common.TDescriptor.Col(common.ColID))),
+		)
+		ds = ds.LeftJoin(
+			companyDescriptorEndpointAlias,
+			goqu.On(companyDescriptorEndpointAlias.Col(common.ColDescriptorID).Eq(companyDescriptorAlias.Col(common.ColDescriptorID))),
+		)
+	}
 
-    ds := d.
-        From(e).
-        LeftJoin(
-            v,
-            goqu.On(v.Col(colEndpointID).Eq(e.Col(colID))),
-        ).
-        LeftJoin(
-            s,
-            goqu.On(s.Col(colEndpointID).Eq(e.Col(colID))),
-        ).
-        Where(goqu.L(fmt.Sprintf("e.%s = ANY(?::bigint[])", colDescriptorID), arr)).
-        Select(
-            e.Col(colDescriptorID),
-            e.Col(colID),
-            goqu.Func("COALESCE", e.Col(colHref), "").As(colHref),
-            goqu.Func("COALESCE", e.Col(colEndpointProtocol), "").As(colEndpointProtocol),
-            goqu.Func("COALESCE", e.Col(colSubProtocol), "").As(colSubProtocol),
-            goqu.Func("COALESCE", e.Col(colSubProtocolBody), "").As(colSubProtocolBody),
-            goqu.Func("COALESCE", e.Col(colSubProtocolBodyEncoding), "").As(colSubProtocolBodyEncoding),
-            goqu.Func("COALESCE", e.Col(colInterface), "").As(colInterface),
+	ds = ds.
+		Where(common.PostgreSQLBigIntArrayContains(joinOn.Col(common.ColDescriptorID), descriptorIDs)).
+		Select(
+			joinOn.Col(common.ColDescriptorID),
+			joinOn.Col(common.ColID),
+			goqu.Func("COALESCE", joinOn.Col(common.ColHref), "").As(common.ColHref),
+			goqu.Func("COALESCE", joinOn.Col(common.ColEndpointProtocol), "").As(common.ColEndpointProtocol),
+			goqu.Func("COALESCE", joinOn.Col(common.ColSubProtocol), "").As(common.ColSubProtocol),
+			goqu.Func("COALESCE", joinOn.Col(common.ColSubProtocolBody), "").As(common.ColSubProtocolBody),
+			goqu.Func("COALESCE", joinOn.Col(common.ColSubProtocolBodyEncoding), "").As(common.ColSubProtocolBodyEncoding),
+			goqu.Func("COALESCE", joinOn.Col(common.ColInterface), "").As(common.ColInterface),
+			goqu.Func("COALESCE", joinOn.Col(common.ColEndpointProtocolVersion), goqu.L("'[]'::jsonb")).As("versions"),
+			goqu.Func("COALESCE", joinOn.Col(common.ColSecurityAttributes), goqu.L("'[]'::jsonb")).As("sec_attrs"),
+		).
+		Order(
+			joinOn.Col(common.ColPosition).Asc(),
+		).
+		Prepared(true)
 
-            // versions
-            goqu.L(
-                fmt.Sprintf(
-                    "COALESCE(ARRAY_AGG(v.%s ORDER BY v.%s)\n                  FILTER (WHERE v.%s IS NOT NULL), '{}')",
-                    colEndpointProtocolVersion, colID, colEndpointProtocolVersion,
-                ),
-            ).As("versions"),
-
-            // sec_attrs
-            goqu.L(
-                fmt.Sprintf(
-                    "COALESCE(JSON_AGG(JSON_BUILD_OBJECT(\n                    'type', s.%s,\n                    'key', s.%s,\n                    'value', s.%s\n                  ) ORDER BY s.%s)\n                  FILTER (WHERE s.%s IS NOT NULL), '[]')",
-                    colSecurityType, colSecurityKey, colSecurityValue, colID, colSecurityType,
-                ),
-            ).As("sec_attrs"),
-        ).
-        GroupBy(
-            e.Col(colDescriptorID),
-            e.Col(colID),
-            e.Col(colHref),
-            e.Col(colEndpointProtocol),
-            e.Col(colSubProtocol),
-            e.Col(colSubProtocolBody),
-            e.Col(colSubProtocolBodyEncoding),
-            e.Col(colInterface),
-        ).
-        Order(
-            e.Col(colDescriptorID).Asc(),
-            e.Col(colID).Asc(),
-        ).
-        Prepared(true)
+	filterSpecs, err := endpointFilterContext(joinOnMainTable)
+	if err != nil {
+		return nil, err
+	}
+	for _, filterSpec := range filterSpecs {
+		ds, err = auth.AddFilterQueryFromContext(ctx, ds, filterSpec.fragment, filterSpec.collector)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	sqlStr, args, err := ds.ToSQL()
 	if err != nil {
@@ -137,39 +181,29 @@ func ReadEndpointsByDescriptorIDs(
 	}
 	defer func() { _ = rows.Close() }()
 
-	type secAttr struct {
-		Type  string `json:"type"`
-		Key   string `json:"key"`
-		Value string `json:"value"`
-	}
-
 	for rows.Next() {
 		var (
 			descID, endpointID                                int64
 			href, proto, subProto, subBody, subBodyEnc, iface string
-			versions                                          pq.StringArray
+			versionsJSON                                      []byte
 			secJSON                                           []byte
 		)
 		if err := rows.Scan(
 			&descID, &endpointID,
 			&href, &proto, &subProto, &subBody, &subBodyEnc, &iface,
-			&versions, &secJSON,
+			&versionsJSON, &secJSON,
 		); err != nil {
 			return nil, err
 		}
 
-		var secAttrs []secAttr
-		if err := json.Unmarshal(secJSON, &secAttrs); err != nil {
+		var versions []string
+		if err := json.Unmarshal(versionsJSON, &versions); err != nil {
 			return nil, err
 		}
 
-		converted := make([]model.ProtocolInformationSecurityAttributes, len(secAttrs))
-		for i, a := range secAttrs {
-			converted[i] = model.ProtocolInformationSecurityAttributes{
-				Type:  a.Type,
-				Key:   a.Key,
-				Value: a.Value,
-			}
+		var secAttrs []model.ProtocolInformationSecurityAttributes
+		if err := json.Unmarshal(secJSON, &secAttrs); err != nil {
+			return nil, err
 		}
 
 		out[descID] = append(out[descID], model.Endpoint{
@@ -180,8 +214,8 @@ func ReadEndpointsByDescriptorIDs(
 				Subprotocol:             subProto,
 				SubprotocolBody:         subBody,
 				SubprotocolBodyEncoding: subBodyEnc,
-				EndpointProtocolVersion: []string(versions),
-				SecurityAttributes:      converted,
+				EndpointProtocolVersion: versions,
+				SecurityAttributes:      secAttrs,
 			},
 		})
 	}
@@ -191,4 +225,45 @@ func ReadEndpointsByDescriptorIDs(
 	}
 
 	return out, nil
+}
+
+type endpointFilterSpec struct {
+	fragment  grammar.FragmentStringPattern
+	collector *grammar.ResolvedFieldPathCollector
+}
+
+func endpointFilterContext(joinOnMainTable string) ([]endpointFilterSpec, error) {
+	switch joinOnMainTable {
+	case "aas":
+		collector, err := grammar.NewResolvedFieldPathCollectorForRoot(grammar.CollectorRootAASDesc)
+		if err != nil {
+			return nil, err
+		}
+		collector.AllowInlineAliases("descriptor", "aas_descriptor", common.AliasAASDescriptorEndpoint)
+		return []endpointFilterSpec{{
+			fragment:  "$aasdesc#endpoints[]",
+			collector: collector,
+		}}, nil
+	case "submodel":
+		collectors, err := newSubmodelDescriptorChildFilterCollectors(
+			"descriptor",
+			common.AliasSubmodelDescriptor,
+			common.AliasSubmodelDescriptorEndpoint,
+		)
+		if err != nil {
+			return nil, err
+		}
+		return []endpointFilterSpec{
+			{
+				fragment:  "$aasdesc#submodelDescriptors[].endpoints[]",
+				collector: collectors.aas,
+			},
+			{
+				fragment:  "$smdesc#endpoints[]",
+				collector: collectors.standalone,
+			},
+		}, nil
+	default:
+		return nil, nil
+	}
 }

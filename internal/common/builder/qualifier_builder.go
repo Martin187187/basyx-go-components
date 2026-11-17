@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -30,9 +30,10 @@ package builder
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 
-	gen "github.com/eclipse-basyx/basyx-go-components/internal/common/model"
+	"github.com/FriedJannik/aas-go-sdk/types"
 )
 
 // QualifiersBuilder constructs Qualifier objects with their associated references
@@ -49,7 +50,7 @@ type QualifiersBuilder struct {
 }
 
 type qualifierWithPosition struct {
-	qualifier *gen.Qualifier
+	qualifier *types.Qualifier
 	position  int
 }
 
@@ -92,33 +93,26 @@ func NewQualifiersBuilder() *QualifiersBuilder {
 //	builder := NewQualifiersBuilder()
 //	builder.AddQualifier(1, "ConceptQualifier", "ExpressionSemantic", "xs:string", "example value")
 //	builder.AddQualifier(2, "ValueQualifier", "ExpressionLogic", "xs:boolean", "true")
-func (b *QualifiersBuilder) AddQualifier(qualifierDbID int64, kind string, qType string, valueType string, value string, position int) (*QualifiersBuilder, error) {
+func (b *QualifiersBuilder) AddQualifier(qualifierDbID int64, qType string, valueType int64, value string, position int, kind *int64) (*QualifiersBuilder, error) {
 	_, exists := b.qualifiers[qualifierDbID]
 	if !exists {
-		ValueType, err := gen.NewDataTypeDefXsdFromValue(valueType)
-		if err != nil {
-			fmt.Println(err)
-			return nil, fmt.Errorf("error parsing ValueType for Qualifier '%d' to Go Struct. See console for details", qualifierDbID)
+		qualifier := types.Qualifier{}
+		qualifier.SetType(qType)
+		qualifier.SetValueType(types.DataTypeDefXSD(valueType))
+		if value != "" {
+			qualifier.SetValue(&value)
 		}
 		b.qualifiers[qualifierDbID] = &qualifierWithPosition{
-			qualifier: &gen.Qualifier{
-				Type:      qType,
-				ValueType: ValueType,
-				Value:     value,
-			},
-			position: position,
+			qualifier: &qualifier,
+			position:  position,
 		}
 
-		if kind != "" {
-			Kind, err := gen.NewQualifierKindFromValue(kind)
-			if err != nil {
-				fmt.Println(err)
-				return nil, fmt.Errorf("error parsing Qualifier Kind to Go Struct for Qualifier '%d'. See console for details", qualifierDbID)
-			}
-			b.qualifiers[qualifierDbID].qualifier.Kind = Kind
+		if kind != nil {
+			qKind := types.QualifierKind(*kind)
+			b.qualifiers[qualifierDbID].qualifier.SetKind(&qKind)
 		}
 	} else {
-		fmt.Printf("[Warning] qualifier with id '%d' already exists - skipping.", qualifierDbID)
+		slog.Warn("duplicate qualifier skipped", "error.code", "BUILDER-ADDQUALIFIER-SKIPDUPLICATE", "qualifier.id", qualifierDbID)
 	}
 
 	return b, nil
@@ -154,7 +148,11 @@ func (b *QualifiersBuilder) AddSemanticID(qualifierDbID int64, semanticIDRows js
 		return nil, err
 	}
 
-	qualifier.qualifier.SemanticID = semanticID
+	if semanticID == nil {
+		return b, nil
+	}
+
+	qualifier.qualifier.SetSemanticID(semanticID)
 
 	return b, nil
 }
@@ -191,7 +189,11 @@ func (b *QualifiersBuilder) AddValueID(qualifierDbID int64, valueIDRows json.Raw
 		return nil, err
 	}
 
-	qualifier.qualifier.ValueID = valueID
+	if valueID == nil {
+		return b, nil
+	}
+
+	qualifier.qualifier.SetValueID(valueID)
 	return b, nil
 }
 
@@ -224,45 +226,43 @@ func (b *QualifiersBuilder) AddSupplementalSemanticIDs(qualifierDbID int64, supp
 		return nil, fmt.Errorf("tried to add SupplementalSemanticIds to Qualifier '%d' before creating the Qualifier itself", qualifierDbID)
 	}
 
-	refs, err := ParseReferences(supplementalSemanticIDsRows, b.refBuilderMap)
+	refs, err := ParseReferences(supplementalSemanticIDsRows, b.refBuilderMap, nil)
 
 	if err != nil {
 		return nil, err
 	}
 
 	if len(supplementalSemanticIDsReferredSemanticIDRows) > 0 {
-		err = ParseReferredReferences(supplementalSemanticIDsReferredSemanticIDRows, b.refBuilderMap)
+		err = ParseReferredReferences(supplementalSemanticIDsReferredSemanticIDRows, b.refBuilderMap, nil)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	suppl := []gen.Reference{}
-
-	for _, el := range refs {
-		suppl = append(suppl, *el)
+	if len(refs) == 0 {
+		refs = nil // This ensures that an empty slice is not set, adhering to JSON omitempty behavior
 	}
 
-	qualifier.qualifier.SupplementalSemanticIds = suppl
+	qualifier.qualifier.SetSupplementalSemanticIDs(refs)
 
 	return b, nil
 }
 
-func (b *QualifiersBuilder) createExactlyOneReference(qualifierDbID int64, refRows json.RawMessage, referredRefRows json.RawMessage, typeOfReference string) (*gen.Reference, error) {
+func (b *QualifiersBuilder) createExactlyOneReference(qualifierDbID int64, refRows json.RawMessage, referredRefRows json.RawMessage, typeOfReference string) (types.IReference, error) {
 	_, exists := b.qualifiers[qualifierDbID]
 
 	if !exists {
 		return nil, fmt.Errorf("tried to add %s to Qualifier '%d' before creating the Qualifier itself", typeOfReference, qualifierDbID)
 	}
 
-	refs, err := ParseReferences(refRows, b.refBuilderMap)
+	refs, err := ParseReferences(refRows, b.refBuilderMap, nil)
 
 	if err != nil {
 		return nil, err
 	}
 
 	if len(referredRefRows) > 0 {
-		err = ParseReferredReferences(referredRefRows, b.refBuilderMap)
+		err = ParseReferredReferences(referredRefRows, b.refBuilderMap, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -313,7 +313,7 @@ func (b *QualifiersBuilder) createExactlyOneReference(qualifierDbID int64, refRo
 //	qualifiers := builder.Build()
 //
 //	// Now 'qualifiers' contains all qualifiers with complete reference hierarchies
-func (b *QualifiersBuilder) Build() []gen.Qualifier {
+func (b *QualifiersBuilder) Build() []types.IQualifier {
 	for _, builder := range b.refBuilderMap {
 		builder.BuildNestedStructure()
 	}
@@ -328,9 +328,9 @@ func (b *QualifiersBuilder) Build() []gen.Qualifier {
 		return qualifierList[i].position < qualifierList[j].position
 	})
 
-	qualifiers := make([]gen.Qualifier, 0, len(qualifierList))
+	qualifiers := make([]types.IQualifier, 0, len(qualifierList))
 	for _, item := range qualifierList {
-		qualifiers = append(qualifiers, *item.qualifier)
+		qualifiers = append(qualifiers, item.qualifier)
 	}
 
 	return qualifiers

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -25,13 +25,15 @@
 
 // Package grammar defines the data structures for representing the AAS Access Rule Language.
 // Author: Aaron Zielstorff ( Fraunhofer IESE ), Jannik Fried ( Fraunhofer IESE )
+//
+//nolint:all
 package grammar
 
 import (
 	"fmt"
 	"strings"
 
-	jsoniter "github.com/json-iterator/go"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
 )
 
 // AccessPermissionRule represents a complete access control rule for Asset Administration Shell (AAS) resources.
@@ -48,15 +50,15 @@ import (
 //   - FORMULA/USEFORMULA: Specifies the logical condition for access (inline formula or reference)
 //     Exactly one must be specified.
 //
-//   - OBJECTS/USEOBJECTS: Identifies which AAS resources the rule applies to (inline or by reference)
-//     Optional - if omitted, the rule may apply to all resources.
+//   - OBJECTS/USEOBJECTS: Identifies which AAS resources the rule applies to (inline and/or by reference)
+//     At least one must be specified.
 //
 //   - FILTER: Optional filter to refine which resources match the rule based on additional criteria
 //
 // Mutual Exclusivity Rules:
 //   - Either ACL or USEACL must be defined (not both, not neither)
 //   - Either FORMULA or USEFORMULA must be defined (not both, not neither)
-//   - OBJECTS and USEOBJECTS can coexist but typically one is used
+//   - OBJECTS and USEOBJECTS may be combined, but at least one must be defined
 //
 // Example JSON (inline definition):
 //
@@ -90,6 +92,9 @@ type AccessPermissionRule struct {
 	// FILTER corresponds to the JSON schema field "FILTER".
 	FILTER *AccessPermissionRuleFILTER `json:"FILTER,omitempty" yaml:"FILTER,omitempty" mapstructure:"FILTER,omitempty"`
 
+	// FILTERLIST corresponds to the JSON schema field "FILTERLIST".
+	FILTERLIST []AccessPermissionRuleFILTER `json:"FILTERLIST,omitempty" yaml:"FILTERLIST,omitempty" mapstructure:"FILTERLIST,omitempty"`
+
 	// FORMULA corresponds to the JSON schema field "FORMULA".
 	FORMULA *LogicalExpression `json:"FORMULA,omitempty" yaml:"FORMULA,omitempty" mapstructure:"FORMULA,omitempty"`
 
@@ -119,6 +124,10 @@ type AccessPermissionRule struct {
 //     - FORMULA: Inline logical expression defining access conditions
 //     - USEFORMULA: Reference to a previously defined formula by name
 //
+//  3. OBJECTS presence: At least one of OBJECTS or USEOBJECTS must be defined.
+//     - OBJECTS: Inline object definitions
+//     - USEOBJECTS: References to named object definitions
+//
 // These validation rules prevent ambiguous or incomplete access permission rules that could
 // lead to security vulnerabilities or undefined behavior. Empty or whitespace-only strings
 // in USEACL or USEFORMULA are treated as not defined.
@@ -133,14 +142,18 @@ type AccessPermissionRule struct {
 //   - Neither ACL nor USEACL is defined
 //   - Both FORMULA and USEFORMULA are defined
 //   - Neither FORMULA nor USEFORMULA is defined
+//   - Neither OBJECTS nor USEOBJECTS is defined
 //     Returns nil on successful unmarshaling and validation.
 func (j *AccessPermissionRule) UnmarshalJSON(value []byte) error {
+	var raw map[string]any
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &raw); err != nil {
+		return err
+	}
 
 	type Plain AccessPermissionRule
 	var plain Plain
 
-	var json = jsoniter.ConfigCompatibleWithStandardLibrary
-	if err := json.Unmarshal(value, &plain); err != nil {
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &plain); err != nil {
 		return err
 	}
 
@@ -152,6 +165,8 @@ func (j *AccessPermissionRule) UnmarshalJSON(value []byte) error {
 	hasUseACL := isStrSet(plain.USEACL)
 	hasFormula := plain.FORMULA != nil
 	hasUseFormula := isStrSet(plain.USEFORMULA)
+	_, hasObjects := raw["OBJECTS"]
+	_, hasUseObjects := raw["USEOBJECTS"]
 
 	if hasACL == hasUseACL {
 		if hasACL {
@@ -165,6 +180,10 @@ func (j *AccessPermissionRule) UnmarshalJSON(value []byte) error {
 			return fmt.Errorf("AccessPermissionRule: only one of FORMULA or USEFORMULA may be defined, not both")
 		}
 		return fmt.Errorf("AccessPermissionRule: exactly one of FORMULA or USEFORMULA must be defined")
+	}
+
+	if !hasObjects && !hasUseObjects {
+		return fmt.Errorf("AccessPermissionRule: OBJECTS or USEOBJECTS must be defined")
 	}
 
 	*j = AccessPermissionRule(plain)

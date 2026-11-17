@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -25,12 +25,26 @@
 
 // Package grammar defines the data structures for representing match expressions in the grammar model.
 // Author: Aaron Zielstorff ( Fraunhofer IESE ), Jannik Fried ( Fraunhofer IESE )
+//
+//nolint:all
 package grammar
 
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
 )
+
+// MarshalJSON serializes internal indeterminate markers as a valid false
+// placeholder. Internal deep-copy code restores the marker after unmarshalling.
+func (me MatchExpression) MarshalJSON() ([]byte, error) {
+	if me.Indeterminate {
+		return []byte(`{"$eq":[{"$boolean":true},{"$boolean":false}]}`), nil
+	}
+	type plain MatchExpression
+	return json.Marshal(plain(me))
+}
 
 // MatchExpression represents a pattern matching expression in the AAS access control grammar.
 //
@@ -49,8 +63,12 @@ import (
 //   - Regex match: {"$regex": ["$aas#id", "^https://.*"]}
 //   - Nested match: {"$match": [{"$eq": [...]}, {"$gt": [...]}]}
 type MatchExpression struct {
-	// Boolean corresponds to the JSON schema field "$boolean".
-	Boolean *bool `json:"$boolean,omitempty" yaml:"$boolean,omitempty" mapstructure:"$boolean,omitempty"`
+	// Indeterminate is an internal runtime marker emitted during partial evaluation.
+	Indeterminate bool `json:"-" yaml:"-" mapstructure:"-"`
+
+	// Boolean is used internally by backend simplification. It is not part of
+	// the JSON matchExpression grammar.
+	Boolean *bool `json:"-" yaml:"-" mapstructure:"-"`
 
 	// Contains corresponds to the JSON schema field "$contains".
 	Contains StringItems `json:"$contains,omitempty" yaml:"$contains,omitempty" mapstructure:"$contains,omitempty"`
@@ -99,14 +117,169 @@ type MatchExpression struct {
 //   - error: An error if the JSON is invalid or if the Match array is present but empty.
 //     Returns nil on successful unmarshaling and validation.
 func (j *MatchExpression) UnmarshalJSON(value []byte) error {
+	if _, err := singleJSONMember(value, "match-expression"); err != nil {
+		return err
+	}
+
 	type Plain MatchExpression
 	var plain Plain
-	if err := json.Unmarshal(value, &plain); err != nil {
+
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &plain); err != nil {
 		return err
 	}
 	if plain.Match != nil && len(plain.Match) < 1 {
 		return fmt.Errorf("field %s length: must be >= %d", "$match", 1)
 	}
+	if err := validateComparisonItems(plain.Eq, "$eq"); err != nil {
+		return err
+	}
+	if err := validateComparisonItems(plain.Ne, "$ne"); err != nil {
+		return err
+	}
+	if err := validateOrderedComparisonItems(plain.Gt, "$gt"); err != nil {
+		return err
+	}
+	if err := validateOrderedComparisonItems(plain.Ge, "$ge"); err != nil {
+		return err
+	}
+	if err := validateOrderedComparisonItems(plain.Lt, "$lt"); err != nil {
+		return err
+	}
+	if err := validateOrderedComparisonItems(plain.Le, "$le"); err != nil {
+		return err
+	}
+	if err := validateStringItems(plain.Contains, "$contains"); err != nil {
+		return err
+	}
+	if err := validateStringItems(plain.StartsWith, "$starts-with"); err != nil {
+		return err
+	}
+	if err := validateStringItems(plain.EndsWith, "$ends-with"); err != nil {
+		return err
+	}
+	if err := validateStringItems(plain.Regex, "$regex"); err != nil {
+		return err
+	}
 	*j = MatchExpression(plain)
+	return nil
+}
+
+// AssertMatchExpressionRequired checks if the required fields are not zero-ed
+func AssertMatchExpressionRequired(obj MatchExpression) error {
+	for _, el := range obj.Match {
+		if err := AssertMatchExpressionRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Eq {
+		if err := AssertValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Ne {
+		if err := AssertValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Gt {
+		if err := AssertValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Ge {
+		if err := AssertValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Lt {
+		if err := AssertValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Le {
+		if err := AssertValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Contains {
+		if err := AssertStringValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.StartsWith {
+		if err := AssertStringValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.EndsWith {
+		if err := AssertStringValueRequired(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Regex {
+		if err := AssertStringValueRequired(el); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// AssertMatchExpressionConstraints checks if the values respects the defined constraints
+func AssertMatchExpressionConstraints(obj MatchExpression) error {
+	for _, el := range obj.Match {
+		if err := AssertMatchExpressionConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Eq {
+		if err := AssertValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Ne {
+		if err := AssertValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Gt {
+		if err := AssertValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Ge {
+		if err := AssertValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Lt {
+		if err := AssertValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Le {
+		if err := AssertValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Contains {
+		if err := AssertStringValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.StartsWith {
+		if err := AssertStringValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.EndsWith {
+		if err := AssertStringValueConstraints(el); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.Regex {
+		if err := AssertStringValueConstraints(el); err != nil {
+			return err
+		}
+	}
 	return nil
 }

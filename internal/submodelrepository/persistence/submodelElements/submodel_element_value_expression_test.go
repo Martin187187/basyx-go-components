@@ -1,0 +1,106 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
+package submodelelements
+
+import (
+	"testing"
+
+	"github.com/doug-martin/goqu/v9"
+	"github.com/stretchr/testify/require"
+)
+
+func TestGetSMEValueExpressionForReadProjectsBlobValueOnlyWhenRequested(t *testing.T) {
+	t.Parallel()
+
+	dialect := goqu.Dialect("postgres")
+
+	withoutBlobValueSQL, _, err := dialect.
+		Select(getSMEValueExpressionForRead(dialect, false)).
+		ToSQL()
+	require.NoError(t, err)
+	require.Contains(t, withoutBlobValueSQL, `"be"."content_type"`)
+	require.NotContains(t, withoutBlobValueSQL, `"be"."value"`)
+
+	withBlobValueSQL, _, err := dialect.
+		Select(getSMEValueExpressionForRead(dialect, true)).
+		ToSQL()
+	require.NoError(t, err)
+	require.Contains(t, withBlobValueSQL, `"be"."content_type"`)
+	require.Contains(t, withBlobValueSQL, `"be"."value"`)
+}
+
+func TestGetSMEValueExpressionForReadSanitizesOperationVariableBlobs(t *testing.T) {
+	t.Parallel()
+
+	dialect := goqu.Dialect("postgres")
+
+	withoutBlobValueSQL, _, err := dialect.
+		Select(getSMEValueExpressionForRead(dialect, false)).
+		ToSQL()
+	require.NoError(t, err)
+	require.Contains(t, withoutBlobValueSQL, "WITH RECURSIVE operation_json_nodes")
+	require.Contains(t, withoutBlobValueSQL, `"current"."payload" #- "target"."path"`)
+	require.Contains(t, withoutBlobValueSQL, `"operation_json_nodes"."node" ->> 'modelType'::text = 'Blob'::text`)
+
+	withBlobValueSQL, _, err := dialect.
+		Select(getSMEValueExpressionForRead(dialect, true)).
+		ToSQL()
+	require.NoError(t, err)
+	require.NotContains(t, withBlobValueSQL, "WITH RECURSIVE operation_json_nodes")
+	require.NotContains(t, withBlobValueSQL, `"current"."payload" #- "target"."path"`)
+}
+
+// PostgreSQL does not guarantee jsonb_agg row order without an explicit
+// ORDER BY: the planner is free to return multilanguage_property_value rows
+// in whatever order a given scan happens to produce, which need not match the
+// order the values were originally submitted in. Without this ordering, the
+// same MultiLanguageProperty read back twice from an otherwise-unchanged
+// database can come back in a different slice order and be misdetected as
+// changed by PUT reconciliation, publishing a phantom event feed update.
+func TestGetSMEValueExpressionOrdersMultiLanguagePropertyValues(t *testing.T) {
+	t.Parallel()
+
+	dialect := goqu.Dialect("postgres")
+	sql, _, err := dialect.
+		Select(getSMEValueExpressionForRead(dialect, false)).
+		ToSQL()
+	require.NoError(t, err)
+	require.Contains(t, sql, `jsonb_agg(jsonb_build_object('language'::text, "mlpv"."language", 'text'::text, "mlpv"."text", 'id'::text, "mlpv"."id") ORDER BY "mlpv"."id")`)
+}
+
+func TestGetSMEValueExpressionDoesNotBindStaticJSONKeys(t *testing.T) {
+	t.Parallel()
+
+	dialect := goqu.Dialect("postgres")
+	_, args, err := dialect.
+		Select(getSMEValueExpressionForRead(dialect, true)).
+		Prepared(true).
+		ToSQL()
+	require.NoError(t, err)
+	require.NotContains(t, args, "content_type")
+	require.NotContains(t, args, "value")
+	require.NotContains(t, args, "modelType")
+}

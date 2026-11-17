@@ -1,0 +1,155 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+// Author: Jannik Fried ( Fraunhofer IESE ), Aaron Zielstorff ( Fraunhofer IESE )
+
+// Package main starts the Digital Product Passport API HTTP server.
+package main
+
+import (
+	"context"
+	"embed"
+	"flag"
+	"log/slog"
+	"os"
+
+	aasregistrydb "github.com/eclipse-basyx/basyx-go-components/internal/aasregistry/persistence"
+	aasrepositorydb "github.com/eclipse-basyx/basyx-go-components/internal/aasrepository/persistence"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/history"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/telemetry"
+	"github.com/eclipse-basyx/basyx-go-components/internal/dppapiservice"
+	"github.com/eclipse-basyx/basyx-go-components/internal/registrysync"
+	smregistrydb "github.com/eclipse-basyx/basyx-go-components/internal/smregistry/persistence"
+	submodelrepositorydb "github.com/eclipse-basyx/basyx-go-components/internal/submodelrepository/persistence"
+)
+
+//go:embed openapi.yaml
+var openapiSpec embed.FS
+
+func runServer(ctx context.Context, configPath string) error {
+	cfg, err := common.LoadConfig(configPath)
+	if err != nil {
+		return err
+	}
+	if _, err = common.ConfigureLogging(cfg, "dppapiservice", configPath, os.Stderr); err != nil {
+		return err
+	}
+	telemetryRuntime, err := telemetry.Configure(ctx, "dppapiservice")
+	if err != nil {
+		return err
+	}
+	defer telemetryRuntime.Shutdown(ctx)
+
+	dppapiservice.ConfigureHistory(cfg.History)
+	if err = history.ConfigureEvidence(ctx, cfg.History.Evidence); err != nil {
+		return err
+	}
+
+	addr := common.ServerAddress(cfg.Server)
+
+	pools, err := openSharedDatabase(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := pools.Close(); closeErr != nil {
+			slog.ErrorContext(ctx, "database pool shutdown failed", "error.code", "DPP-DB-CLOSE", "error", closeErr)
+		}
+	}()
+
+	aasRepositoryPersistence, err := aasrepositorydb.NewAssetAdministrationShellDatabaseFromPools(pools.Writer, pools.Reader, cfg.Server.StrictVerification)
+	if err != nil {
+		return err
+	}
+
+	submodelRepositoryPersistence, err := submodelrepositorydb.NewSubmodelDatabaseFromPools(pools.Writer, pools.Reader, nil, cfg.Server.StrictVerification)
+	if err != nil {
+		return err
+	}
+	registrySyncConfig, err := registrysync.NewConfig(
+		cfg.General.AASRegistryIntegration,
+		cfg.General.SubmodelRegistryIntegration,
+		cfg.General.ExternalURL,
+	)
+	if err != nil {
+		return err
+	}
+	aasRegistryPersistence, err := aasregistrydb.NewPostgreSQLAASRegistryDatabaseFromPools(
+		pools.Writer, pools.Reader, cfg.Server.CacheEnabled,
+	)
+	if err != nil {
+		return err
+	}
+	submodelRegistryPersistence, err := smregistrydb.NewPostgreSQLSMBackendFromPools(pools.Writer, pools.Reader)
+	if err != nil {
+		return err
+	}
+
+	router, err := dppapiservice.NewHTTPHandlerWithRegistrySync(
+		ctx,
+		cfg,
+		openapiSpec,
+		aasRepositoryPersistence,
+		submodelRepositoryPersistence,
+		aasRegistryPersistence,
+		submodelRegistryPersistence,
+		registrySyncConfig,
+		pools.Writer,
+	)
+	if err != nil {
+		return err
+	}
+
+	slog.InfoContext(ctx, "HTTP server starting", "address", addr, "context_path", cfg.Server.ContextPath)
+	return common.RunHTTPServer(ctx, "DPP", cfg.Server, router)
+}
+
+func openSharedDatabase(ctx context.Context, cfg *common.Config) (*common.PostgresPools, error) {
+	pools, err := common.OpenPostgresPoolsWithSchemaValidation(ctx, cfg.Postgres, "dppapiservice", common.CURRENT_DATABASE_VERSION)
+	if err != nil {
+		return nil, err
+	}
+	db := pools.Writer
+	if err = history.ApplyPostgresGuardConfig(ctx, db); err != nil {
+		_ = pools.Close()
+		return nil, err
+	}
+	return pools, nil
+}
+
+func main() {
+	ctx, stop := common.SignalContext()
+
+	configPath := ""
+	flag.StringVar(&configPath, "config", "", "Path to config file")
+	flag.Parse()
+
+	if err := runServer(ctx, configPath); err != nil {
+		slog.ErrorContext(ctx, "server stopped", "error.code", "DPP-MAIN-RUNSERVER", "error", err)
+		stop()
+		os.Exit(1)
+	}
+	stop()
+}

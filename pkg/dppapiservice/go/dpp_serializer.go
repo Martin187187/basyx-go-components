@@ -1,0 +1,696 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+// Author: Jannik Fried ( Fraunhofer IESE ), Aaron Zielstorff ( Fraunhofer IESE )
+
+package dppapi
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+
+	"github.com/FriedJannik/aas-go-sdk/stringification"
+	"github.com/FriedJannik/aas-go-sdk/types"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	basyxmodel "github.com/eclipse-basyx/basyx-go-components/internal/common/model"
+)
+
+type dppSerializationContext struct {
+	submodelID               string
+	externalBaseURL          string
+	managedAttachmentPaths   map[string]struct{}
+	managedPathHistoryLookup bool
+}
+
+func composeHeader(metadata types.ISubmodel) (dppDocument, error) {
+	valueOnly, err := basyxmodel.SubmodelToValueOnly(metadata)
+	if err != nil {
+		return nil, fmt.Errorf("DPP-COMPOSE-METAVALUE convert metadata value-only: %w", err)
+	}
+	raw, err := json.Marshal(valueOnly)
+	if err != nil {
+		return nil, fmt.Errorf("DPP-COMPOSE-METAMARSHAL marshal metadata value-only: %w", err)
+	}
+	var header dppDocument
+	if err := common.DecodeJSONPreservingNumbers(raw, &header); err != nil {
+		return nil, fmt.Errorf("DPP-COMPOSE-METAUNMARSHAL unmarshal metadata value-only: %w", err)
+	}
+	normalizeValueOnly(header)
+	return header, nil
+}
+
+func compressedContent(submodel types.ISubmodel) (any, error) {
+	return compressedContentWithContext(submodel, dppSerializationContext{})
+}
+
+func compressedContentWithContext(submodel types.ISubmodel, serializationContext dppSerializationContext) (any, error) {
+	valueOnly, err := basyxmodel.SubmodelToValueOnly(submodel)
+	if err != nil {
+		return nil, fmt.Errorf("DPP-CONTENT-COMPRESSED convert submodel value-only: %w", err)
+	}
+	raw, err := json.Marshal(valueOnly)
+	if err != nil {
+		return nil, fmt.Errorf("DPP-CONTENT-MARSHAL marshal submodel value-only: %w", err)
+	}
+	var content any
+	if err := common.DecodeJSONPreservingNumbers(raw, &content); err != nil {
+		return nil, fmt.Errorf("DPP-CONTENT-UNMARSHAL unmarshal submodel value-only: %w", err)
+	}
+	if err := enrichCompressedValue(content, submodel.SubmodelElements(), "", serializationContext); err != nil {
+		return nil, err
+	}
+	return content, nil
+}
+
+func compressedElementValueWithContext(element types.ISubmodelElement, idShortPath string, serializationContext dppSerializationContext) (any, error) {
+	valueOnly, err := basyxmodel.SubmodelElementToValueOnly(element)
+	if err != nil {
+		return nil, fmt.Errorf("DPP-ELEM-COMPRESSED convert element value-only: %w", err)
+	}
+	raw, err := json.Marshal(valueOnly)
+	if err != nil {
+		return nil, fmt.Errorf("DPP-ELEM-COMPRESSED-MARSHAL marshal element value-only: %w", err)
+	}
+	var content any
+	if err := common.DecodeJSONPreservingNumbers(raw, &content); err != nil {
+		return nil, fmt.Errorf("DPP-ELEM-COMPRESSED-UNMARSHAL unmarshal element value-only: %w", err)
+	}
+	if err := enrichCompressedElementValue(content, element, idShortPath, serializationContext); err != nil {
+		return nil, err
+	}
+	return content, nil
+}
+
+func fullContent(submodel types.ISubmodel) (any, error) {
+	return fullContentWithContext(submodel, dppSerializationContext{})
+}
+
+func fullContentWithContext(submodel types.ISubmodel, serializationContext dppSerializationContext) (any, error) {
+	content, err := dppCollectionFromSubmodel(submodel, serializationContext)
+	if err != nil {
+		return nil, fmt.Errorf("DPP-CONTENT-FULL convert submodel to DPP expanded representation: %w", err)
+	}
+	return content, nil
+}
+
+func normalizeValueOnly(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		if rawValue, ok := typed["value"]; ok && typed["contentType"] != nil {
+			typed["url"] = rawValue
+			delete(typed, "value")
+		}
+		for _, child := range typed {
+			normalizeValueOnly(child)
+		}
+	case []any:
+		for index, child := range typed {
+			if langMap, ok := child.(map[string]any); ok && len(langMap) == 1 {
+				for language, text := range langMap {
+					typed[index] = map[string]any{"language": language, "value": text}
+				}
+			}
+			normalizeValueOnly(typed[index])
+		}
+	}
+}
+
+func dppCollectionFromSubmodel(submodel types.ISubmodel, serializationContext dppSerializationContext) (map[string]any, error) {
+	elements, err := dppElementsFromAAS(submodel.SubmodelElements(), "", serializationContext)
+	if err != nil {
+		return nil, err
+	}
+	result := dppElementBase(idShortOrID(submodel), "DataElementCollection", submodel.SemanticID())
+	result["elements"] = elements
+	return result, nil
+}
+
+func dppElementFromAASWithContext(element types.ISubmodelElement, idShortPath string, serializationContext dppSerializationContext) (map[string]any, error) {
+	switch typed := element.(type) {
+	case *types.Property:
+		return singleValuedDataElement(typed), nil
+	case *types.SubmodelElementList:
+		return multiValuedDataElement(typed, idShortPath, serializationContext)
+	case *types.MultiLanguageProperty:
+		return multiLanguageDataElement(typed), nil
+	case *types.SubmodelElementCollection:
+		return dataElementCollection(typed, idShortPath, serializationContext)
+	case *types.Entity:
+		return entityDataElementCollection(typed, idShortPath, serializationContext)
+	case *types.File:
+		return relatedResourceWithContext(typed, idShortPath, serializationContext)
+	default:
+		return nil, newDPPHTTPError(
+			http.StatusUnprocessableEntity,
+			"DPP-ELEM-FULL-UNSUPPORTED",
+			fmt.Sprintf("unsupported AAS element type %v", element.ModelType()),
+		)
+	}
+}
+
+func singleValuedDataElement(property *types.Property) map[string]any {
+	result := dppElementBase(idShortValue(property), "SingleValuedDataElement", property.SemanticID())
+	result["valueDataType"] = dppValueType(property.ValueType())
+	result["value"] = dereferenceString(property.Value())
+	return result
+}
+
+func multiValuedDataElement(list *types.SubmodelElementList, idShortPath string, serializationContext dppSerializationContext) (map[string]any, error) {
+	result := dppElementBase(idShortValue(list), "MultiValuedDataElement", list.SemanticID())
+	if valueType, ok := dppListValueType(list); ok {
+		result["valueDataType"] = valueType
+	}
+	elements := make([]map[string]any, 0, len(list.Value()))
+	for index, child := range list.Value() {
+		childPath := fmt.Sprintf("%s[%d]", idShortPath, index)
+		element, err := dppElementFromAASWithContext(child, childPath, serializationContext)
+		if err != nil {
+			return nil, err
+		}
+		if element["elementId"] == "" {
+			element["elementId"] = fmt.Sprintf("%s%d", idShortValue(list), index)
+		}
+		elements = append(elements, element)
+	}
+	result["elements"] = elements
+	return result, nil
+}
+
+func multiLanguageDataElement(property *types.MultiLanguageProperty) map[string]any {
+	result := dppElementBase(idShortValue(property), "MultiLanguageDataElement", property.SemanticID())
+	values := make([]map[string]any, 0, len(property.Value()))
+	for _, langString := range property.Value() {
+		values = append(values, map[string]any{
+			"language": langString.Language(),
+			"value":    langString.Text(),
+		})
+	}
+	result["value"] = values
+	return result
+}
+
+func dataElementCollection(collection *types.SubmodelElementCollection, idShortPath string, serializationContext dppSerializationContext) (map[string]any, error) {
+	elements, err := dppElementsFromAAS(collection.Value(), idShortPath, serializationContext)
+	if err != nil {
+		return nil, err
+	}
+	result := dppElementBase(idShortValue(collection), "DataElementCollection", collection.SemanticID())
+	result["elements"] = elements
+	return result, nil
+}
+
+func entityDataElementCollection(entity *types.Entity, idShortPath string, serializationContext dppSerializationContext) (map[string]any, error) {
+	elements, err := entityIdentityDataElements(entity)
+	if err != nil {
+		return nil, err
+	}
+	if len(entity.Statements()) > 0 {
+		statements, err := dppElementsFromAAS(entity.Statements(), idShortPath, serializationContext)
+		if err != nil {
+			return nil, err
+		}
+		statementCollection := dppElementBase("statements", "DataElementCollection", nil)
+		statementCollection["elements"] = statements
+		elements = append(elements, statementCollection)
+	}
+	result := dppElementBase(idShortValue(entity), "DataElementCollection", entity.SemanticID())
+	result["elements"] = elements
+	return result, nil
+}
+
+func entityIdentityDataElements(entity *types.Entity) ([]map[string]any, error) {
+	elements := make([]map[string]any, 0, 4)
+	if entity.EntityType() != nil {
+		entityType, ok := stringification.EntityTypeToString(*entity.EntityType())
+		if !ok {
+			return nil, unsupportedEntityField("entityType", *entity.EntityType())
+		}
+		elements = append(elements, dppStringDataElement("entityType", entityType))
+	}
+	if entity.GlobalAssetID() != nil {
+		elements = append(elements, dppStringDataElement("globalAssetId", *entity.GlobalAssetID()))
+	}
+	if len(entity.SpecificAssetIDs()) > 0 {
+		specificAssetIDs, err := specificAssetIDsDataElement(entity.SpecificAssetIDs())
+		if err != nil {
+			return nil, err
+		}
+		elements = append(elements, specificAssetIDs)
+	}
+	return elements, nil
+}
+
+func specificAssetIDsDataElement(specificAssetIDs []types.ISpecificAssetID) (map[string]any, error) {
+	elements := make([]map[string]any, 0, len(specificAssetIDs))
+	for index, specificAssetID := range specificAssetIDs {
+		fields := []map[string]any{
+			dppStringDataElement("name", specificAssetID.Name()),
+			dppStringDataElement("value", specificAssetID.Value()),
+		}
+		if specificAssetID.ExternalSubjectID() != nil {
+			externalSubjectID, err := referenceDataElement("externalSubjectId", specificAssetID.ExternalSubjectID())
+			if err != nil {
+				return nil, err
+			}
+			fields = append(fields, externalSubjectID)
+		}
+		item := dppElementBase(fmt.Sprintf("specificAssetId%d", index), "DataElementCollection", specificAssetID.SemanticID())
+		item["elements"] = fields
+		elements = append(elements, item)
+	}
+	result := dppElementBase("specificAssetIds", "MultiValuedDataElement", nil)
+	result["elements"] = elements
+	return result, nil
+}
+
+func referenceDataElement(elementID string, reference types.IReference) (map[string]any, error) {
+	referenceType, ok := stringification.ReferenceTypesToString(reference.Type())
+	if !ok {
+		return nil, unsupportedEntityField(elementID+".type", reference.Type())
+	}
+	elements := []map[string]any{dppStringDataElement("type", referenceType)}
+	keys, err := referenceKeysDataElement(reference.Keys())
+	if err != nil {
+		return nil, err
+	}
+	elements = append(elements, keys)
+	if reference.ReferredSemanticID() != nil {
+		referredSemanticID, err := referenceDataElement("referredSemanticId", reference.ReferredSemanticID())
+		if err != nil {
+			return nil, err
+		}
+		elements = append(elements, referredSemanticID)
+	}
+	result := dppElementBase(elementID, "DataElementCollection", nil)
+	result["elements"] = elements
+	return result, nil
+}
+
+func referenceKeysDataElement(keys []types.IKey) (map[string]any, error) {
+	elements := make([]map[string]any, 0, len(keys))
+	for index, key := range keys {
+		keyType, ok := stringification.KeyTypesToString(key.Type())
+		if !ok {
+			return nil, unsupportedEntityField(fmt.Sprintf("externalSubjectId.keys[%d].type", index), key.Type())
+		}
+		item := dppElementBase(fmt.Sprintf("key%d", index), "DataElementCollection", nil)
+		item["elements"] = []map[string]any{
+			dppStringDataElement("type", keyType),
+			dppStringDataElement("value", key.Value()),
+		}
+		elements = append(elements, item)
+	}
+	result := dppElementBase("keys", "MultiValuedDataElement", nil)
+	result["elements"] = elements
+	return result, nil
+}
+
+func dppStringDataElement(elementID string, value string) map[string]any {
+	result := dppElementBase(elementID, "SingleValuedDataElement", nil)
+	result["valueDataType"] = "xsd:string"
+	result["value"] = value
+	return result
+}
+
+func unsupportedEntityField(field string, value any) error {
+	return newDPPHTTPError(
+		http.StatusUnprocessableEntity,
+		"DPP-ELEM-FULL-UNSUPPORTED",
+		fmt.Sprintf("unsupported Entity %s value %v", field, value),
+	)
+}
+
+func relatedResourceWithContext(file *types.File, idShortPath string, serializationContext dppSerializationContext) (map[string]any, error) {
+	result := dppElementBase(idShortValue(file), "RelatedResource", file.SemanticID())
+	result["contentType"] = dereferenceString(file.ContentType())
+	attachmentURL, err := relatedResourceURL(file, idShortPath, serializationContext)
+	if err != nil {
+		return nil, err
+	}
+	result["url"] = attachmentURL
+	if resourceTitle := extensionValue(file.Extensions(), dppResourceTitleExtensionName); resourceTitle != "" {
+		result["resourceTitle"] = resourceTitle
+	}
+	if language := extensionValue(file.Extensions(), dppLanguageExtensionName); language != "" {
+		result["language"] = language
+	}
+	return result, nil
+}
+
+func dppElementsFromAAS(elements []types.ISubmodelElement, parentPath string, serializationContext dppSerializationContext) ([]map[string]any, error) {
+	value := make([]map[string]any, 0, len(elements))
+	for _, element := range elements {
+		path := nestedIDShortPath(parentPath, idShortValue(element))
+		mapped, err := dppElementFromAASWithContext(element, path, serializationContext)
+		if err != nil {
+			return nil, err
+		}
+		value = append(value, mapped)
+	}
+	return value, nil
+}
+
+func nestedIDShortPath(parentPath string, idShort string) string {
+	if parentPath == "" {
+		return idShort
+	}
+	if idShort == "" {
+		return parentPath
+	}
+	return parentPath + "." + idShort
+}
+
+func relatedResourceURL(file *types.File, idShortPath string, serializationContext dppSerializationContext) (string, error) {
+	value := dereferenceString(file.Value())
+	if isExternalResourceURL(value) || !serializationContext.isManagedAttachment(idShortPath, value) {
+		return value, nil
+	}
+	if serializationContext.externalBaseURL == "" {
+		return "", newDPPHTTPError(
+			http.StatusInternalServerError,
+			"DPP-FILEURL-MISSINGEXTERNALURL",
+			"managed attachment requires a valid general.externalUrl",
+		)
+	}
+	return fmt.Sprintf(
+		"%s/submodels/%s/submodel-elements/%s/attachment",
+		serializationContext.externalBaseURL,
+		common.EncodeString(serializationContext.submodelID),
+		url.PathEscape(idShortPath),
+	), nil
+}
+
+func (c dppSerializationContext) isManagedAttachment(idShortPath string, value string) bool {
+	if _, managed := c.managedAttachmentPaths[idShortPath]; managed {
+		return true
+	}
+	return c.managedPathHistoryLookup && isHistoricalManagedAttachmentValue(value)
+}
+
+func isHistoricalManagedAttachmentValue(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if strings.HasPrefix(trimmed, "/aasx/files/") {
+		return true
+	}
+	oid, err := strconv.ParseInt(trimmed, 10, 64)
+	return err == nil && oid > 0
+}
+
+func isExternalResourceURL(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	return scheme == "http" || scheme == "https"
+}
+
+func dppElementBase(elementID string, objectType string, semanticID types.IReference) map[string]any {
+	result := map[string]any{
+		"elementId":  elementID,
+		"objectType": objectType,
+	}
+	if dictionaryReference := referenceToString(semanticID); dictionaryReference != "" {
+		result["dictionaryReference"] = dictionaryReference
+	}
+	return result
+}
+
+func idShortValue(value interface{ IDShort() *string }) string {
+	if value.IDShort() == nil {
+		return ""
+	}
+	return *value.IDShort()
+}
+
+func dppListValueType(list *types.SubmodelElementList) (string, bool) {
+	if list.TypeValueListElement() != types.AASSubmodelElementsProperty {
+		return "", false
+	}
+	if list.ValueTypeListElement() != nil {
+		return dppValueType(*list.ValueTypeListElement()), true
+	}
+	for _, child := range list.Value() {
+		if property, ok := child.(*types.Property); ok {
+			return dppValueType(property.ValueType()), true
+		}
+	}
+	return "", false
+}
+
+func dppValueType(valueType types.DataTypeDefXSD) string {
+	text := "string"
+	switch valueType {
+	case types.DataTypeDefXSDAnyURI:
+		text = "anyURI"
+	case types.DataTypeDefXSDBase64Binary:
+		text = "base64Binary"
+	case types.DataTypeDefXSDBoolean:
+		text = "boolean"
+	case types.DataTypeDefXSDByte:
+		text = "byte"
+	case types.DataTypeDefXSDDate:
+		text = "date"
+	case types.DataTypeDefXSDDateTime:
+		text = "dateTime"
+	case types.DataTypeDefXSDDecimal:
+		text = "decimal"
+	case types.DataTypeDefXSDDouble:
+		text = "double"
+	case types.DataTypeDefXSDDuration:
+		text = "duration"
+	case types.DataTypeDefXSDFloat:
+		text = "float"
+	case types.DataTypeDefXSDGDay:
+		text = "gDay"
+	case types.DataTypeDefXSDGMonth:
+		text = "gMonth"
+	case types.DataTypeDefXSDGMonthDay:
+		text = "gMonthDay"
+	case types.DataTypeDefXSDGYear:
+		text = "gYear"
+	case types.DataTypeDefXSDGYearMonth:
+		text = "gYearMonth"
+	case types.DataTypeDefXSDHexBinary:
+		text = "hexBinary"
+	case types.DataTypeDefXSDInt:
+		text = "int"
+	case types.DataTypeDefXSDInteger:
+		text = "integer"
+	case types.DataTypeDefXSDLong:
+		text = "long"
+	case types.DataTypeDefXSDNegativeInteger:
+		text = "negativeInteger"
+	case types.DataTypeDefXSDNonNegativeInteger:
+		text = "nonNegativeInteger"
+	case types.DataTypeDefXSDNonPositiveInteger:
+		text = "nonPositiveInteger"
+	case types.DataTypeDefXSDPositiveInteger:
+		text = "positiveInteger"
+	case types.DataTypeDefXSDShort:
+		text = "short"
+	case types.DataTypeDefXSDTime:
+		text = "time"
+	case types.DataTypeDefXSDUnsignedByte:
+		text = "unsignedByte"
+	case types.DataTypeDefXSDUnsignedInt:
+		text = "unsignedInt"
+	case types.DataTypeDefXSDUnsignedLong:
+		text = "unsignedLong"
+	case types.DataTypeDefXSDUnsignedShort:
+		text = "unsignedShort"
+	}
+	return "xsd:" + text
+}
+
+func referenceToString(ref types.IReference) string {
+	value := referenceLastValue(ref)
+	if value == "" {
+		return ""
+	}
+	return value
+}
+
+func dereferenceString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func enrichCompressedValue(value any, elements []types.ISubmodelElement, parentPath string, serializationContext dppSerializationContext) error {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	for _, element := range elements {
+		idShort := idShortValue(element)
+		if idShort == "" {
+			continue
+		}
+		path := nestedIDShortPath(parentPath, idShort)
+		if err := enrichCompressedElementValue(object[idShort], element, path, serializationContext); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func enrichCompressedElementValue(value any, element types.ISubmodelElement, idShortPath string, serializationContext dppSerializationContext) error {
+	switch typed := element.(type) {
+	case *types.File:
+		return enrichCompressedFileValue(value, typed, idShortPath, serializationContext)
+	case *types.MultiLanguageProperty:
+		normalizeCompressedMultiLanguageValue(value)
+	case *types.SubmodelElementCollection:
+		return enrichCompressedValue(value, typed.Value(), idShortPath, serializationContext)
+	case *types.SubmodelElementList:
+		items, ok := value.([]any)
+		if !ok {
+			return nil
+		}
+		for index, child := range typed.Value() {
+			if index >= len(items) {
+				return nil
+			}
+			childPath := fmt.Sprintf("%s[%d]", idShortPath, index)
+			if err := enrichCompressedElementValue(items[index], child, childPath, serializationContext); err != nil {
+				return err
+			}
+		}
+	case *types.Entity:
+		return enrichCompressedEntityValue(value, typed, idShortPath, serializationContext)
+	}
+	return nil
+}
+
+func enrichCompressedEntityValue(value any, entity *types.Entity, idShortPath string, serializationContext dppSerializationContext) error {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	if err := enrichCompressedSpecificAssetIDs(object, entity.SpecificAssetIDs()); err != nil {
+		return err
+	}
+	return enrichCompressedValue(object["statements"], entity.Statements(), idShortPath, serializationContext)
+}
+
+func enrichCompressedSpecificAssetIDs(object map[string]any, specificAssetIDs []types.ISpecificAssetID) error {
+	items, ok := object["specificAssetIds"].([]any)
+	if !ok {
+		return nil
+	}
+	for index, specificAssetID := range specificAssetIDs {
+		if index >= len(items) || specificAssetID.ExternalSubjectID() == nil {
+			continue
+		}
+		item, ok := items[index].(map[string]any)
+		if !ok {
+			continue
+		}
+		reference, err := referenceValueOnly(specificAssetID.ExternalSubjectID())
+		if err != nil {
+			return err
+		}
+		item["externalSubjectId"] = reference
+	}
+	return nil
+}
+
+func referenceValueOnly(reference types.IReference) (map[string]any, error) {
+	referenceType, ok := stringification.ReferenceTypesToString(reference.Type())
+	if !ok {
+		return nil, unsupportedEntityField("externalSubjectId.type", reference.Type())
+	}
+	result := map[string]any{
+		"type": referenceType,
+		"keys": make([]any, 0, len(reference.Keys())),
+	}
+	keys := result["keys"].([]any)
+	for index, key := range reference.Keys() {
+		keyType, valid := stringification.KeyTypesToString(key.Type())
+		if !valid {
+			return nil, unsupportedEntityField(fmt.Sprintf("externalSubjectId.keys[%d].type", index), key.Type())
+		}
+		keys = append(keys, map[string]any{"type": keyType, "value": key.Value()})
+	}
+	result["keys"] = keys
+	if reference.ReferredSemanticID() != nil {
+		referredSemanticID, err := referenceValueOnly(reference.ReferredSemanticID())
+		if err != nil {
+			return nil, err
+		}
+		result["referredSemanticId"] = referredSemanticID
+	}
+	return result, nil
+}
+
+func enrichCompressedFileValue(value any, file *types.File, idShortPath string, serializationContext dppSerializationContext) error {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	attachmentURL, err := relatedResourceURL(file, idShortPath, serializationContext)
+	if err != nil {
+		return err
+	}
+	object["url"] = attachmentURL
+	delete(object, "value")
+	if resourceTitle := extensionValue(file.Extensions(), dppResourceTitleExtensionName); resourceTitle != "" {
+		object["resourceTitle"] = resourceTitle
+	}
+	if language := extensionValue(file.Extensions(), dppLanguageExtensionName); language != "" {
+		object["language"] = language
+	}
+	return nil
+}
+
+func normalizeCompressedMultiLanguageValue(value any) {
+	items, ok := value.([]any)
+	if !ok {
+		return
+	}
+	for index, item := range items {
+		languageValue, ok := item.(map[string]any)
+		if !ok || len(languageValue) != 1 {
+			continue
+		}
+		for language, text := range languageValue {
+			items[index] = map[string]any{"language": language, "value": text}
+		}
+	}
+}
+
+func extensionValue(extensions []types.IExtension, name string) string {
+	for _, extension := range extensions {
+		if extension.Name() == name {
+			return dereferenceString(extension.Value())
+		}
+	}
+	return ""
+}

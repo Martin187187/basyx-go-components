@@ -1,0 +1,336 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"maps"
+	"mime/multipart"
+	"net/http"
+	"net/textproto"
+	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/testenv"
+	openapi "github.com/eclipse-basyx/basyx-go-components/pkg/aasxfileserverapi/go"
+	"github.com/stretchr/testify/require"
+)
+
+const composeFilePath = "./docker_compose/docker_compose.yml"
+
+var (
+	baseURL             = testenv.LocalURLFromEnv("BASYX_IT_API_PORT", 6004)
+	replicaBURL         = testenv.LocalURLFromEnv("BASYX_IT_API_B_PORT", 6005)
+	contextBaseURL      = testenv.LocalURLFromEnv("BASYX_IT_CONTEXT_API_PORT", 6006) + "/external/aasx"
+	limitedBaseURL      = testenv.LocalURLFromEnv("BASYX_IT_LIMITED_API_PORT", 6009)
+	saturatedBaseURL    = testenv.LocalURLFromEnv("BASYX_IT_SATURATED_API_PORT", 6013)
+	syncOnlyBaseURL     = testenv.LocalURLFromEnv("BASYX_IT_SYNC_ONLY_API_PORT", 6014)
+	secureBaseURL       = testenv.LocalhostURLFromEnv("BASYX_IT_SECURITY_API_PORT", 6010)
+	secureReplicaBURL   = testenv.LocalhostURLFromEnv("BASYX_IT_SECURITY_API_B_PORT", 6011)
+	securityKeycloakURL = testenv.LocalhostURLFromEnv("BASYX_IT_KEYCLOAK_PORT", 8080) + "/realms/basyx/protocol/openid-connect/token"
+	composeProject      string
+	composeEnv          []string
+	databaseDSN         = "host=127.0.0.1 port=6432 user=admin password=admin123 dbname=basyxTestDB sslmode=disable"
+)
+
+func TestMain(m *testing.M) {
+	if os.Getenv("BASYX_EXTERNAL_COMPOSE") == "1" {
+		os.Exit(m.Run())
+	}
+
+	runtime := testenv.NewComposeRuntimeOrExit("aasxfileserver-it", []testenv.PortBinding{
+		{Name: "api", EnvVar: "BASYX_IT_API_PORT"},
+		{Name: "api-b", EnvVar: "BASYX_IT_API_B_PORT"},
+		{Name: "context-api", EnvVar: "BASYX_IT_CONTEXT_API_PORT"},
+		{Name: "limited-api", EnvVar: "BASYX_IT_LIMITED_API_PORT"},
+		{Name: "saturated-api", EnvVar: "BASYX_IT_SATURATED_API_PORT"},
+		{Name: "sync-only-api", EnvVar: "BASYX_IT_SYNC_ONLY_API_PORT"},
+		{Name: "security-api", EnvVar: "BASYX_IT_SECURITY_API_PORT"},
+		{Name: "security-api-b", EnvVar: "BASYX_IT_SECURITY_API_B_PORT"},
+		{Name: "keycloak", EnvVar: "BASYX_IT_KEYCLOAK_PORT"},
+		{Name: "db", EnvVar: "BASYX_IT_DB_PORT"},
+	})
+	baseURL = runtime.LocalURL("api")
+	replicaBURL = runtime.LocalURL("api-b")
+	contextBaseURL = runtime.LocalURL("context-api") + "/external/aasx"
+	limitedBaseURL = runtime.LocalURL("limited-api")
+	saturatedBaseURL = runtime.LocalURL("saturated-api")
+	syncOnlyBaseURL = runtime.LocalURL("sync-only-api")
+	secureBaseURL = runtime.LocalhostURL("security-api")
+	secureReplicaBURL = runtime.LocalhostURL("security-api-b")
+	securityKeycloakURL = runtime.LocalhostURL("keycloak") + "/realms/basyx/protocol/openid-connect/token"
+	databaseDSN = runtime.PostgresKeywordDSN("db", "basyxTestDB")
+	composeProject = runtime.ProjectName
+	securityEnv := testenv.PrepareSecurityEnvOrExit("security_env", nil)
+	composeEnv = runtime.EnvWith("BASYX_IT_SECURITY_ENV=" + securityEnv)
+
+	code := testenv.RunComposeTestMain(m, testenv.ComposeTestMainOptions{
+		ComposeFile:     composeFilePath,
+		ProjectName:     runtime.ProjectName,
+		Env:             composeEnv,
+		PreDownBeforeUp: true,
+		HealthURL:       baseURL + "/health",
+		HealthTimeout:   2 * time.Minute,
+		WaitForReady: func() error {
+			for _, healthURL := range []string{
+				replicaBURL + "/health",
+				contextBaseURL + "/health",
+				limitedBaseURL + "/health",
+				saturatedBaseURL + "/health",
+				syncOnlyBaseURL + "/health",
+				secureBaseURL + "/health",
+				secureReplicaBURL + "/health",
+			} {
+				if err := testenv.WaitHealthyURL(healthURL, 2*time.Minute); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	})
+	_ = os.RemoveAll(securityEnv)
+	os.Exit(code)
+}
+
+const aasxPackageContentType = "application/asset-administration-shell-package"
+
+func TestPackageLifecycle(t *testing.T) {
+	uploadBody, uploadStatus, uploadHeaders := uploadAASXPackage(t, "../../aasenvironment/integration_tests/testdata/IESEDriveMotorDM3000.aasx")
+	require.Equal(t, http.StatusCreated, uploadStatus)
+	require.NotEmpty(t, uploadHeaders.Get("Location"))
+
+	created := decodePackageDescription(t, uploadBody)
+	require.NotEmpty(t, created.PackageId)
+
+	listResult, listStatus := listPackages(t)
+	require.Equal(t, http.StatusOK, listStatus)
+	require.NotEmpty(t, listResult.Result)
+	require.Contains(t, collectPackageIDs(listResult.Result), created.PackageId)
+
+	downloadResp, downloadBody := request(t, http.MethodGet, packageURL(baseURL, created.PackageId), nil, "")
+	require.Equal(t, http.StatusOK, downloadResp.StatusCode)
+	require.NotEmpty(t, downloadResp.Header.Get("X-FileName"))
+	require.Equal(t, aasxPackageContentType, downloadResp.Header.Get("Content-Type"))
+	require.NotEmpty(t, downloadBody)
+
+	updateStatus := putAASXPackage(t, created.PackageId, "../../aasenvironment/integration_tests/testdata/ProductionPlanSFKL.aasx")
+	require.Equal(t, http.StatusNoContent, updateStatus)
+
+	updatedResp, _ := request(t, http.MethodGet, packageURL(baseURL, created.PackageId), nil, "")
+	require.Equal(t, http.StatusOK, updatedResp.StatusCode)
+	require.Equal(t, aasxPackageContentType, updatedResp.Header.Get("Content-Type"))
+
+	deleteResp, _ := request(t, http.MethodDelete, packageURL(baseURL, created.PackageId), nil, "")
+	require.Equal(t, http.StatusNoContent, deleteResp.StatusCode)
+
+	notFoundResp, _ := request(t, http.MethodGet, packageURL(baseURL, created.PackageId), nil, "")
+	require.Equal(t, http.StatusNotFound, notFoundResp.StatusCode)
+}
+
+func TestPackageDescriptionsFollowOpenAPI(t *testing.T) {
+	const packagePath = "../../aasenvironment/integration_tests/testdata/IESEDriveMotorDM3000.aasx"
+	aasIDs := []string{"urn:example:aas:openapi,1", "urn:example:aas:openapi:2"}
+
+	payload, contentType := multipartFilePayload(t, packagePath, aasIDs)
+	postResp, postBody := request(t, http.MethodPost, baseURL+"/packages", bytes.NewReader(payload), contentType)
+	require.Equalf(t, http.StatusCreated, postResp.StatusCode, "post response: %s", postBody)
+	posted := requirePackageDescriptionBody(t, postBody, aasIDs)
+	t.Cleanup(func() { request(t, http.MethodDelete, packageURL(baseURL, posted.PackageId), nil, "") })
+	require.Equal(t, "/packages/"+url.PathEscape(common.EncodeString(posted.PackageId)), postResp.Header.Get("Location"))
+
+	putPackageID := "urn:example:package:" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	payload, contentType = multipartFilePayload(t, packagePath, aasIDs)
+	putResp, putBody := request(t, http.MethodPut, packageURL(baseURL, putPackageID), bytes.NewReader(payload), contentType)
+	require.Equalf(t, http.StatusCreated, putResp.StatusCode, "put response: %s", putBody)
+	t.Cleanup(func() { request(t, http.MethodDelete, packageURL(baseURL, putPackageID), nil, "") })
+	require.Equal(t, putPackageID, requirePackageDescriptionBody(t, putBody, aasIDs).PackageId)
+
+	listResp, listBody := request(t, http.MethodGet, baseURL+"/packages?aasId="+url.QueryEscape(common.EncodeString(aasIDs[0])), nil, "")
+	require.Equal(t, http.StatusOK, listResp.StatusCode)
+	var page map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(listBody, &page))
+	require.Contains(t, page, "paging_metadata")
+	require.NotContains(t, page, "pagingMetadata")
+	var listed openapi.GetPackageDescriptionsResult
+	require.NoError(t, json.Unmarshal(listBody, &listed))
+	require.ElementsMatch(t, []string{posted.PackageId, putPackageID}, collectPackageIDs(listed.Result))
+}
+
+func TestPackageUploadWithoutFileName(t *testing.T) {
+	const packagePath = "../../aasenvironment/integration_tests/testdata/IESEDriveMotorDM3000.aasx"
+
+	namelessPayload, namelessContentType := namelessPackagePayload(t, packagePath)
+	postResp, postBody := request(t, http.MethodPost, baseURL+"/packages", bytes.NewReader(namelessPayload), namelessContentType)
+	require.Equalf(t, http.StatusCreated, postResp.StatusCode, "post response: %s", postBody)
+	created := decodePackageDescription(t, postBody)
+	t.Cleanup(func() { request(t, http.MethodDelete, packageURL(baseURL, created.PackageId), nil, "") })
+	require.Equal(t, created.PackageId+".aasx", downloadedFileName(t, created.PackageId))
+
+	payload, contentType := multipartFilePayload(t, packagePath, nil)
+	putResp, putBody := request(t, http.MethodPut, packageURL(baseURL, created.PackageId), bytes.NewReader(payload), contentType)
+	require.Equalf(t, http.StatusNoContent, putResp.StatusCode, "put response: %s", putBody)
+	require.Equal(t, filepath.Base(packagePath), downloadedFileName(t, created.PackageId))
+
+	putResp, putBody = request(t, http.MethodPut, packageURL(baseURL, created.PackageId), bytes.NewReader(namelessPayload), namelessContentType)
+	require.Equalf(t, http.StatusNoContent, putResp.StatusCode, "put response: %s", putBody)
+	require.Equal(t, filepath.Base(packagePath), downloadedFileName(t, created.PackageId))
+}
+
+func namelessPackagePayload(t *testing.T, path string) ([]byte, string) {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Clean(path))
+	require.NoError(t, err)
+
+	var payload bytes.Buffer
+	writer := multipart.NewWriter(&payload)
+	part, err := writer.CreatePart(textproto.MIMEHeader{
+		"Content-Disposition": {`form-data; name="file"`},
+		"Content-Type":        {aasxPackageContentType},
+	})
+	require.NoError(t, err)
+	_, err = part.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	return payload.Bytes(), writer.FormDataContentType()
+}
+
+func downloadedFileName(t *testing.T, packageID string) string {
+	t.Helper()
+	resp, body := request(t, http.MethodGet, packageURL(baseURL, packageID), nil, "")
+	require.Equalf(t, http.StatusOK, resp.StatusCode, "download response: %s", body)
+	return resp.Header.Get("X-FileName")
+}
+
+func requirePackageDescriptionBody(t *testing.T, body []byte, expectedAASIDs []string) openapi.PackageDescription {
+	t.Helper()
+	var properties map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(body, &properties))
+	require.ElementsMatch(t, []string{"packageId", "aasIds"}, slices.Collect(maps.Keys(properties)))
+	description := decodePackageDescription(t, body)
+	require.Equal(t, expectedAASIDs, description.AasIds)
+	return description
+}
+
+func uploadAASXPackage(t *testing.T, relativePath string) ([]byte, int, http.Header) {
+	t.Helper()
+
+	filePath := filepath.Clean(relativePath)
+	file, err := os.Open(filePath)
+	require.NoError(t, err)
+	defer func() { _ = file.Close() }()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	filePart, err := writer.CreateFormFile("file", filepath.Base(filePath))
+	require.NoError(t, err)
+	_, err = io.Copy(filePart, file)
+	require.NoError(t, err)
+
+	require.NoError(t, writer.Close())
+
+	resp, responseBody := request(t, http.MethodPost, baseURL+"/packages", body, writer.FormDataContentType())
+	return responseBody, resp.StatusCode, resp.Header
+}
+
+func putAASXPackage(t *testing.T, packageID string, relativePath string) int {
+	t.Helper()
+
+	filePath := filepath.Clean(relativePath)
+	file, err := os.Open(filePath)
+	require.NoError(t, err)
+	defer func() { _ = file.Close() }()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	filePart, err := writer.CreateFormFile("file", filepath.Base(filePath))
+	require.NoError(t, err)
+	_, err = io.Copy(filePart, file)
+	require.NoError(t, err)
+
+	require.NoError(t, writer.Close())
+
+	resp, _ := request(t, http.MethodPut, packageURL(baseURL, packageID), body, writer.FormDataContentType())
+	return resp.StatusCode
+}
+
+func listPackages(t *testing.T) (openapi.GetPackageDescriptionsResult, int) {
+	t.Helper()
+
+	resp, body := request(t, http.MethodGet, baseURL+"/packages", nil, "")
+	var result openapi.GetPackageDescriptionsResult
+	require.NoError(t, json.Unmarshal(body, &result))
+	return result, resp.StatusCode
+}
+
+func decodePackageDescription(t *testing.T, body []byte) openapi.PackageDescription {
+	t.Helper()
+
+	var created openapi.PackageDescription
+	require.NoError(t, json.Unmarshal(body, &created))
+	return created
+}
+
+func packageURL(serviceURL string, packageID string) string {
+	return serviceURL + "/packages/" + url.PathEscape(common.EncodeString(packageID))
+}
+
+func collectPackageIDs(items []openapi.PackageDescription) []string {
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		result = append(result, item.PackageId)
+	}
+	return result
+}
+
+func request(t *testing.T, method string, endpoint string, body io.Reader, contentType string) (*http.Response, []byte) {
+	t.Helper()
+
+	req, err := http.NewRequest(method, endpoint, body)
+	require.NoError(t, err)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	// #nosec G704 -- Integration tests call a fixed local compose URL only.
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	responseBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp, responseBody
+}

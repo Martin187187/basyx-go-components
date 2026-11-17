@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -25,6 +25,8 @@
 
 // Package grammar defines the data structures for representing queries in the grammar model.
 // Author: Aaron Zielstorff ( Fraunhofer IESE ), Jannik Fried ( Fraunhofer IESE )
+//
+//nolint:all
 package grammar
 
 import (
@@ -93,7 +95,7 @@ func TestQueryWrapperUnmarshal_NestedAndOr(t *testing.T) {
 						"$or": [
 							{
 								"$gt": [
-									{"$field": "$sm#id"},
+									{"$numCast":{"$field": "$sm#id"}},
 									{"$numVal": 100}
 								]
 							},
@@ -161,37 +163,37 @@ func TestQueryWrapperUnmarshal_AllComparisonOperators(t *testing.T) {
 	}{
 		{
 			name:    "Equality",
-			json:    `{"Query": {"$condition": {"$eq": [{"$field": "$sm#id"}, {"$numVal": 1}]}}}`,
+			json:    `{"Query": {"$condition": {"$eq": [{"$numCast":{"$field": "$sm#id"}}, {"$numVal": 1}]}}}`,
 			checkOp: func(le *LogicalExpression) bool { return len(le.Eq) == 2 },
 			opName:  "$eq",
 		},
 		{
 			name:    "Not Equal",
-			json:    `{"Query": {"$condition": {"$ne": [{"$field": "$sm#id"}, {"$numVal": 1}]}}}`,
+			json:    `{"Query": {"$condition": {"$ne": [{"$numCast":{"$field": "$sm#id"}}, {"$numVal": 1}]}}}`,
 			checkOp: func(le *LogicalExpression) bool { return len(le.Ne) == 2 },
 			opName:  "$ne",
 		},
 		{
 			name:    "Greater Than",
-			json:    `{"Query": {"$condition": {"$gt": [{"$field": "$sm#id"}, {"$numVal": 1}]}}}`,
+			json:    `{"Query": {"$condition": {"$gt": [{"$numCast":{"$field": "$sm#id"}}, {"$numVal": 1}]}}}`,
 			checkOp: func(le *LogicalExpression) bool { return len(le.Gt) == 2 },
 			opName:  "$gt",
 		},
 		{
 			name:    "Greater or Equal",
-			json:    `{"Query": {"$condition": {"$ge": [{"$field": "$sm#id"}, {"$numVal": 1}]}}}`,
+			json:    `{"Query": {"$condition": {"$ge": [{"$numCast":{"$field": "$sm#id"}}, {"$numVal": 1}]}}}`,
 			checkOp: func(le *LogicalExpression) bool { return len(le.Ge) == 2 },
 			opName:  "$ge",
 		},
 		{
 			name:    "Less Than",
-			json:    `{"Query": {"$condition": {"$lt": [{"$field": "$sm#id"}, {"$numVal": 1}]}}}`,
+			json:    `{"Query": {"$condition": {"$lt": [{"$numCast":{"$field": "$sm#id"}}, {"$numVal": 1}]}}}`,
 			checkOp: func(le *LogicalExpression) bool { return len(le.Lt) == 2 },
 			opName:  "$lt",
 		},
 		{
 			name:    "Less or Equal",
-			json:    `{"Query": {"$condition": {"$le": [{"$field": "$sm#id"}, {"$numVal": 1}]}}}`,
+			json:    `{"Query": {"$condition": {"$le": [{"$numCast":{"$field": "$sm#id"}}, {"$numVal": 1}]}}}`,
 			checkOp: func(le *LogicalExpression) bool { return len(le.Le) == 2 },
 			opName:  "$le",
 		},
@@ -233,7 +235,7 @@ func TestQueryWrapperUnmarshal_DifferentValueTypes(t *testing.T) {
 		},
 		{
 			name: "Numeric Value",
-			json: `{"Query": {"$condition": {"$eq": [{"$field": "$sm#id"}, {"$numVal": 42}]}}}`,
+			json: `{"Query": {"$condition": {"$eq": [{"$numCast":{"$field": "$sm#id"}}, {"$numVal": 42}]}}}`,
 			checkVal: func(v *Value) bool {
 				return v.NumVal != nil && *v.NumVal == 42
 			},
@@ -241,7 +243,7 @@ func TestQueryWrapperUnmarshal_DifferentValueTypes(t *testing.T) {
 		},
 		{
 			name: "Float Value",
-			json: `{"Query": {"$condition": {"$eq": [{"$field": "$sm#id"}, {"$numVal": 3.14}]}}}`,
+			json: `{"Query": {"$condition": {"$eq": [{"$numCast":{"$field": "$sm#id"}}, {"$numVal": 3.14}]}}}`,
 			checkVal: func(v *Value) bool {
 				return v.NumVal != nil && *v.NumVal == 3.14
 			},
@@ -249,7 +251,7 @@ func TestQueryWrapperUnmarshal_DifferentValueTypes(t *testing.T) {
 		},
 		{
 			name: "Boolean Value",
-			json: `{"Query": {"$condition": {"$eq": [{"$field": "$sm#id"}, {"$boolean": true}]}}}`,
+			json: `{"Query": {"$condition": {"$eq": [{"$boolCast":{"$field": "$sm#id"}}, {"$boolean": true}]}}}`,
 			checkVal: func(v *Value) bool {
 				return v.Boolean != nil && *v.Boolean == true
 			},
@@ -345,6 +347,31 @@ func TestQueryWrapperUnmarshal_EmptyQuery(t *testing.T) {
 
 	if wrapper.Query.Condition != nil {
 		t.Error("Expected Condition to be nil for empty query")
+	}
+}
+
+func TestQueryWrapperUnmarshal_SubFilterMatch(t *testing.T) {
+	jsonStr := `{
+		"Query": {
+			"$condition": {"$boolean": true},
+			"$filters": [{
+				"$fragment": "$sm#supplementalSemanticIds[]",
+				"$match": true,
+				"$condition": {"$boolean": true}
+			}]
+		}
+	}`
+
+	var wrapper QueryWrapper
+	if err := json.Unmarshal([]byte(jsonStr), &wrapper); err != nil {
+		t.Fatalf("Failed to unmarshal query filter MATCH: %v", err)
+	}
+	if len(wrapper.Query.FilterConditions) != 1 {
+		t.Fatalf("Expected one filter condition, got %d", len(wrapper.Query.FilterConditions))
+	}
+	match := wrapper.Query.FilterConditions[0].Match
+	if match == nil || !*match {
+		t.Fatal("Expected explicit $match to be preserved")
 	}
 }
 
@@ -464,6 +491,38 @@ func TestQueryWrapperUnmarshal_ValueToValueComparison(t *testing.T) {
 
 			if !tt.checkVals(&leftOperand, &rightOperand) {
 				t.Errorf("Value validation failed for %s", tt.desc)
+			}
+		})
+	}
+}
+
+func TestQueryUnmarshal_SelectIdentifiers(t *testing.T) {
+	var query Query
+	if err := json.Unmarshal([]byte(`{"$select":"id","$condition":{"$boolean":true}}`), &query); err != nil {
+		t.Fatalf("Failed to unmarshal query: %v", err)
+	}
+	if !query.SelectsIdentifiers() {
+		t.Fatal("Expected query to select identifiers")
+	}
+}
+
+func TestQueryUnmarshal_WithoutSelectReturnsObjects(t *testing.T) {
+	var query Query
+	if err := json.Unmarshal([]byte(`{"$condition":{"$boolean":true}}`), &query); err != nil {
+		t.Fatalf("Failed to unmarshal query: %v", err)
+	}
+	if query.SelectsIdentifiers() {
+		t.Fatal("Expected query without $select to return objects")
+	}
+}
+
+func TestQueryUnmarshal_RejectsInvalidSelect(t *testing.T) {
+	for _, selectJSON := range []string{`"idShort"`, `"ID"`, `""`, `["$aas#id"]`, `null`, `1`} {
+		t.Run(selectJSON, func(t *testing.T) {
+			var query Query
+			payload := `{"$select":` + selectJSON + `,"$condition":{"$boolean":true}}`
+			if err := json.Unmarshal([]byte(payload), &query); err == nil {
+				t.Fatalf("Expected $select %s to be rejected", selectJSON)
 			}
 		})
 	}

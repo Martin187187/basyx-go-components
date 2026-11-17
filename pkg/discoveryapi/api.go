@@ -5,7 +5,7 @@
  *
  * The entire Full Profile of the Discovery Service Specification as part of the [Specification of the Asset Administration Shell: Part 2](http://industrialdigitaltwin.org/en/content-hub).   Publisher: Industrial Digital Twin Association (IDTA) April 2023
  *
- * API version: V3.0.3_SSP-001
+ * API version: V3.2.0
  * Contact: info@idtwin.org
  */
 
@@ -15,6 +15,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/FriedJannik/aas-go-sdk/types"
 	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
 )
 
@@ -43,7 +44,7 @@ type AssetAdministrationShellBasicDiscoveryAPIAPIServicer interface {
 	GetAllAssetAdministrationShellIdsByAssetLink(context.Context, []string, int32, string) (model.ImplResponse, error)
 	SearchAllAssetAdministrationShellIdsByAssetLink(ctx context.Context, limit int32, cursor string, assetLink []model.AssetLink) (model.ImplResponse, error)
 	GetAllAssetLinksByID(context.Context, string) (model.ImplResponse, error)
-	PostAllAssetLinksByID(context.Context, string, []model.SpecificAssetID) (model.ImplResponse, error)
+	PostAllAssetLinksByID(context.Context, string, []types.ISpecificAssetID) (model.ImplResponse, error)
 	DeleteAllAssetLinksByID(context.Context, string) (model.ImplResponse, error)
 }
 

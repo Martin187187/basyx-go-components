@@ -1,113 +1,195 @@
-// Command aasregistryservice starts the AAS Registry HTTP service.
-//
-// It loads configuration, initializes the PostgreSQL-backed Asset Administration
-// Shell (AAS) registry persistence, registers the API routes, and serves the
-// HTTP endpoints. CORS and a health endpoint are enabled via common helpers.
-//
-// Flags:
-//
-//	-config          Path to service configuration file
-//	-databaseSchema  Optional path to a SQL schema file to initialize the
-//	                 database (overrides the default bundled schema)
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+// Author: Martin Stemmer ( Fraunhofer IESE )
+
+// Package main implements the AAS Registry Service server.
 package main
 
 import (
 	"context"
+	"embed"
 	"flag"
-	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 
-	ass_registry_api "github.com/eclipse-basyx/basyx-go-components/internal/aasregistry/api"
+	aasregistryapi "github.com/eclipse-basyx/basyx-go-components/internal/aasregistry/api"
 	aasregistrydatabase "github.com/eclipse-basyx/basyx-go-components/internal/aasregistry/persistence"
 	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/asyncjob"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/binarycontent"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/history"
+	commonmodel "github.com/eclipse-basyx/basyx-go-components/internal/common/model"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/security/abacpolicy"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/security/rebac"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/telemetry"
 	apis "github.com/eclipse-basyx/basyx-go-components/pkg/aasregistryapi"
 	"github.com/go-chi/chi/v5"
 )
 
-func runServer(ctx context.Context, configPath string, databaseSchema string) error {
-	log.Default().Println("Loading AAS Registry Service...")
-	log.Default().Println("Config Path:", configPath)
+//go:embed openapi.yaml
+var openapiSpec embed.FS
 
+func runServer(ctx context.Context, configPath string) error {
 	cfg, err := common.LoadConfig(configPath)
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
 		return err
 	}
+	if _, err = common.ConfigureLogging(cfg, "aasregistryservice", configPath, os.Stderr); err != nil {
+		return err
+	}
+	telemetryRuntime, err := telemetry.Configure(ctx, "aasregistryservice")
+	if err != nil {
+		return err
+	}
+	defer telemetryRuntime.Shutdown(ctx)
+	if err := commonmodel.SetVerificationMode(cfg.Server.StrictVerification); err != nil {
+		return err
+	}
+	history.Configure(history.Config{
+		Mode:                 cfg.History.Mode,
+		RetentionDays:        cfg.History.RetentionDays,
+		FullSnapshotInterval: cfg.History.FullSnapshotInterval,
+		Immutability:         cfg.History.Immutability,
+		AuditIdentityMode:    cfg.History.AuditIdentityMode,
+	})
+	if err = history.ConfigureEvidence(ctx, cfg.History.Evidence); err != nil {
+		return err
+	}
+	commonmodel.SetSupportsSingularSupplementalSemanticId(cfg.General.SupportsSingularSupplementalSemanticId)
 
 	r := chi.NewRouter()
+
+	// Make configuration available in request contexts.
+	r.Use(common.ConfigMiddleware(cfg))
 
 	common.AddCors(r, cfg)
 	common.AddHealthEndpoint(r, cfg)
 
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-		cfg.Postgres.User,
-		cfg.Postgres.Password,
-		cfg.Postgres.Host,
-		cfg.Postgres.Port,
-		cfg.Postgres.DBName,
-	)
-	log.Printf("🗄️  Connecting to Postgres with DSN: postgres://%s:****@%s:%d/%s?sslmode=disable",
-		cfg.Postgres.User, cfg.Postgres.Host, cfg.Postgres.Port, cfg.Postgres.DBName)
+	// Add Swagger UI
+	if err := common.AddSwaggerUIFromFS(r, openapiSpec, "openapi.yaml", "AAS Registry Service API", "/swagger", "/api-docs/openapi.yaml", cfg); err != nil {
+		slog.WarnContext(ctx, "Swagger UI unavailable", "error.code", "AASREGISTRY-SWAGGER-INIT", "error", err)
+	}
 
-	smDatabase, err := aasregistrydatabase.NewPostgreSQLAASRegistryDatabase(
-		dsn,
-		cfg.Postgres.MaxOpenConnections,
-		cfg.Postgres.MaxIdleConnections,
-		cfg.Postgres.ConnMaxLifetimeMinutes,
-		cfg.Server.CacheEnabled,
-		databaseSchema,
-	)
+	slog.InfoContext(ctx, "connecting to PostgreSQL")
 
+	pools, err := common.OpenPostgresPoolsWithSchemaValidation(ctx, cfg.Postgres, "aasregistryservice", common.CURRENT_DATABASE_VERSION)
 	if err != nil {
-		log.Printf("❌ DB connect failed: %v", err)
+		slog.ErrorContext(ctx, "database connection failed", "error.code", "AASREGISTRY-DB-CONNECT", "error", err)
 		return err
 	}
-	log.Println("✅ Postgres connection established")
-
-	smSvc := ass_registry_api.NewAssetAdministrationShellRegistryAPIAPIService(*smDatabase)
-	smCtrl := apis.NewAssetAdministrationShellRegistryAPIAPIController(smSvc, cfg.Server.ContextPath)
-	for _, rt := range smCtrl.Routes() {
-		r.Method(rt.Method, rt.Pattern, rt.HandlerFunc)
-	}
-	descSvc := apis.NewDescriptionAPIAPIService()
-	descCtrl := apis.NewDescriptionAPIAPIController(descSvc)
-	for _, rt := range descCtrl.Routes() {
-		r.Method(rt.Method, rt.Pattern, rt.HandlerFunc)
-	}
-
-	addr := "0.0.0.0:" + fmt.Sprintf("%d", cfg.Server.Port)
-	log.Printf("▶️ AAS Registry listening on %s (contextPath=%q)\n", addr, cfg.Server.ContextPath)
-
-	go func() {
-		if err := http.ListenAndServe(addr, r); err != http.ErrServerClosed {
-			log.Printf("Server error: %v", err)
+	defer func() {
+		if closeErr := pools.Close(); closeErr != nil {
+			slog.ErrorContext(ctx, "database pool shutdown failed", "error.code", "AASREGISTRY-DB-CLOSE", "error", closeErr)
 		}
 	}()
+	sharedDB := pools.Writer
+	if err = history.ApplyPostgresGuardConfig(ctx, sharedDB); err != nil {
+		return err
+	}
 
-	<-ctx.Done()
-	log.Println("Shutting down server...")
-	return nil
+	smDatabase, err := aasregistrydatabase.NewPostgreSQLAASRegistryDatabaseFromPools(pools.Writer, pools.Reader, cfg.Server.CacheEnabled)
+	if err != nil {
+		slog.ErrorContext(ctx, "AAS registry persistence initialization failed", "error.code", "AASREGISTRY-DB-INIT", "error", err)
+		return err
+	}
+	slog.InfoContext(ctx, "PostgreSQL connection established")
+
+	smSvc := aasregistryapi.NewAssetAdministrationShellRegistryAPIAPIService(*smDatabase)
+	smCtrl := apis.NewAssetAdministrationShellRegistryAPIAPIController(smSvc, cfg.Server.ContextPath)
+	bulkManager, err := asyncjob.NewPostgresManager(ctx, sharedDB, "AASR-BULK", 0)
+	if err != nil {
+		slog.ErrorContext(ctx, "async job persistence initialization failed", "error.code", "AASREGISTRY-ASYNCJOB-INIT", "error", err)
+		return err
+	}
+	bulkSvc := aasregistryapi.NewBulkService(smSvc, bulkManager)
+	bulkHandler := aasregistryapi.NewBulkHTTPHandler(bulkSvc)
+
+	descSvc := aasregistryapi.NewDescriptionAPIAPIService()
+	descCtrl := apis.NewDescriptionAPIAPIController(descSvc)
+
+	base := common.NormalizeBasePath(cfg.Server.ContextPath)
+
+	// === Protected API Subrouter ===
+	apiRouter := chi.NewRouter()
+	conditionalGuard := common.NewConditionalGuard(cfg)
+	common.ConfigureAPIRouter(apiRouter, "AASRegistryService")
+
+	// Apply OIDC + ABAC once for all registry endpoints
+	abacRepo, rebacRuntime, err := rebac.SetupSecurity(ctx, cfg, apiRouter, sharedDB, "aasregistryservice")
+	if err != nil {
+		return err
+	}
+	versioningGuard := history.NewMutationCoverageGuard(apiRouter)
+	versioningGuard.Exempt(http.MethodPost, "/verify")
+	apiRouter.Use(versioningGuard.Middleware)
+	apiRouter.Use(history.AuditContextMiddleware(cfg))
+	abacpolicy.ExemptManagementMutationRoutesIfEnabled(cfg, versioningGuard, "aasregistryservice")
+	abacpolicy.RegisterManagementRoutesIfEnabled(cfg, apiRouter, abacRepo, "aasregistryservice")
+	rebac.ExemptManagementMutationRoutes(versioningGuard, rebacRuntime, rebac.KindAASDescriptor)
+	rebac.RegisterManagementRoutes(apiRouter, rebacRuntime, rebac.KindAASDescriptor)
+	if cfg.Server.VerificationEndpointAvailable {
+		common.AddVerificationEndpoint(apiRouter, cfg, binarycontent.NewStager(sharedDB))
+	}
+
+	// Register all registry routes (protected)
+	for operation, rt := range smCtrl.Routes() {
+		versioningGuard.ClassifyRoute(operation, rt.Method, rt.Pattern)
+		apiRouter.Method(rt.Method, rt.Pattern, conditionalGuard.Wrap(rt.Pattern, rt.HandlerFunc))
+	}
+
+	// Register all description routes (protected)
+	for operation, rt := range descCtrl.Routes() {
+		versioningGuard.ClassifyRoute(operation, rt.Method, rt.Pattern)
+		apiRouter.Method(rt.Method, rt.Pattern, conditionalGuard.Wrap(rt.Pattern, rt.HandlerFunc))
+	}
+	versioningGuard.Cover(http.MethodPost, "/bulk/shell-descriptors")
+	versioningGuard.Cover(http.MethodPut, "/bulk/shell-descriptors")
+	versioningGuard.Cover(http.MethodDelete, "/bulk/shell-descriptors")
+	bulkHandler.RegisterRoutes(apiRouter, true)
+
+	// Mount protected API under base path
+	r.Mount(base, apiRouter)
+
+	addr := common.ServerAddress(cfg.Server)
+	slog.InfoContext(ctx, "HTTP server starting", "address", addr, "context_path", cfg.Server.ContextPath)
+
+	return common.RunHTTPServer(ctx, "AASR", cfg.Server, r)
 }
 
 func main() {
-	ctx := context.Background()
+	ctx, stop := common.SignalContext()
 
 	configPath := ""
-	databaseSchema := ""
 	flag.StringVar(&configPath, "config", "", "Path to config file")
-	flag.StringVar(&databaseSchema, "databaseSchema", "", "Path to Database Schema SQL file (overrides default)")
 	flag.Parse()
 
-	if databaseSchema != "" {
-		if _, fileError := os.ReadFile(databaseSchema); fileError != nil {
-			fmt.Println("The specified database schema path is invalid or the file was not found.")
-			os.Exit(1)
-		}
+	if err := runServer(ctx, configPath); err != nil {
+		slog.ErrorContext(ctx, "server stopped", "error.code", "AASREGISTRY-MAIN-RUNSERVER", "error", err)
+		stop()
+		os.Exit(1)
 	}
-
-	if err := runServer(ctx, configPath, databaseSchema); err != nil {
-		log.Fatalf("Server error: %v", err)
-	}
+	stop()
 }

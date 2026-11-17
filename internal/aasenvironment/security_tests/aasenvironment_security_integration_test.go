@@ -1,0 +1,970 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
+//nolint:all
+package main
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/testenv"
+	"github.com/stretchr/testify/require"
+)
+
+const actionUploadMultipart = "UPLOAD_MULTIPART"
+const securityUploadMaxSizeBytes = 4 << 20
+
+var testBaseURL = testenv.LocalhostURLFromEnv("BASYX_IT_API_PORT", 6004)
+var testDatabaseURL = testenv.PostgresURLFromEnv("BASYX_IT_DB_PORT", 5432, "basyxTestDB")
+var testKeycloakTokenURL = testenv.LocalhostURLFromEnv("BASYX_IT_KEYCLOAK_PORT", 18080) + "/realms/basyx/protocol/openid-connect/token"
+
+func TestIntegration(t *testing.T) {
+	tokenProvider := testenv.NewPasswordGrantTokenProvider(
+		testKeycloakTokenURL,
+		"basyx-ui",
+		10*time.Second,
+	)
+
+	testenv.RunJSONSuite(t, testenv.JSONSuiteOptions{
+		DefaultExpectedStatus: http.StatusOK,
+		TokenProvider:         tokenProvider,
+		ActionHandlers: map[string]testenv.JSONStepAction{
+			actionUploadMultipart: func(t *testing.T, _ *testenv.JSONSuiteRunner, step testenv.JSONSuiteStep, _ int) {
+				runMultipartUploadAction(t, step, tokenProvider)
+			},
+		},
+	})
+}
+
+func TestIntegrationSerializationSecurity(t *testing.T) {
+	testenv.RunJSONSuite(t, testenv.JSONSuiteOptions{
+		ConfigPath:            "serialization_it_config.json",
+		DefaultExpectedStatus: http.StatusOK,
+		TokenProvider: testenv.NewPasswordGrantTokenProvider(
+			testKeycloakTokenURL,
+			"basyx-ui",
+			10*time.Second,
+		),
+	})
+}
+
+func TestSuperpathEndpointsSecurity(t *testing.T) {
+	tokenProvider := testenv.NewPasswordGrantTokenProvider(
+		testKeycloakTokenURL,
+		"basyx-ui",
+		10*time.Second,
+	)
+
+	adminToken, err := tokenProvider.GetAccessToken(&testenv.TokenCredentials{
+		User:     "admin",
+		Password: "pwd",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, adminToken)
+
+	userXToken, err := tokenProvider.GetAccessToken(&testenv.TokenCredentials{
+		User:     "userx",
+		Password: "pwd",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, userXToken)
+
+	encodedAAS := base64.RawURLEncoding.EncodeToString([]byte("urn:test:aas:security:missing"))
+	encodedSubmodel := base64.RawURLEncoding.EncodeToString([]byte("urn:test:submodel:security:missing"))
+	basePath := "/shells/" + encodedAAS + "/submodels/" + encodedSubmodel
+
+	type endpointCase struct {
+		name        string
+		method      string
+		path        string
+		body        string
+		contentType string
+	}
+
+	testCases := []endpointCase{
+		{name: "GET submodel", method: http.MethodGet, path: basePath},
+		{name: "PUT submodel", method: http.MethodPut, path: basePath, body: `{"id":"urn:test:submodel:security:missing","idShort":"Missing","modelType":"Submodel","kind":"Instance","submodelElements":[]}`},
+		{name: "DELETE submodel", method: http.MethodDelete, path: basePath},
+		{name: "PATCH submodel", method: http.MethodPatch, path: basePath, body: `{"idShort":"UpdatedByPatch"}`},
+		{name: "GET submodel metadata", method: http.MethodGet, path: basePath + "/$metadata"},
+		{name: "PATCH submodel metadata", method: http.MethodPatch, path: basePath + "/$metadata", body: `{"idShort":"UpdatedMetadata"}`},
+		{name: "GET submodel value", method: http.MethodGet, path: basePath + "/$value"},
+		{name: "PATCH submodel value", method: http.MethodPatch, path: basePath + "/$value", body: `{"submodelElements":[]}`},
+		{name: "GET submodel reference", method: http.MethodGet, path: basePath + "/$reference"},
+		{name: "GET submodel path", method: http.MethodGet, path: basePath + "/$path"},
+		{name: "GET submodel elements", method: http.MethodGet, path: basePath + "/submodel-elements"},
+		{name: "POST submodel elements", method: http.MethodPost, path: basePath + "/submodel-elements", body: `{"idShort":"ElementX","modelType":"Property","valueType":"xs:string","value":"x"}`},
+		{name: "GET submodel elements metadata", method: http.MethodGet, path: basePath + "/submodel-elements/$metadata"},
+		{name: "GET submodel elements value", method: http.MethodGet, path: basePath + "/submodel-elements/$value"},
+		{name: "GET submodel elements reference", method: http.MethodGet, path: basePath + "/submodel-elements/$reference"},
+		{name: "GET submodel elements path", method: http.MethodGet, path: basePath + "/submodel-elements/$path"},
+		{name: "GET submodel element", method: http.MethodGet, path: basePath + "/submodel-elements/NoSuchElement"},
+		{name: "PUT submodel element", method: http.MethodPut, path: basePath + "/submodel-elements/NoSuchElement", body: `{"idShort":"NoSuchElement","modelType":"Property","valueType":"xs:string","value":"x"}`},
+		{name: "POST submodel element", method: http.MethodPost, path: basePath + "/submodel-elements/NoSuchElement", body: `{"idShort":"NestedElement","modelType":"Property","valueType":"xs:string","value":"x"}`},
+		{name: "DELETE submodel element", method: http.MethodDelete, path: basePath + "/submodel-elements/NoSuchElement"},
+		{name: "PATCH submodel element", method: http.MethodPatch, path: basePath + "/submodel-elements/NoSuchElement", body: `{"value":"patched"}`},
+		{name: "GET submodel element metadata", method: http.MethodGet, path: basePath + "/submodel-elements/NoSuchElement/$metadata"},
+		{name: "PATCH submodel element metadata", method: http.MethodPatch, path: basePath + "/submodel-elements/NoSuchElement/$metadata", body: `{"idShort":"NoSuchElementPatched"}`},
+		{name: "GET submodel element value", method: http.MethodGet, path: basePath + "/submodel-elements/NoSuchElement/$value"},
+		{name: "PATCH submodel element value", method: http.MethodPatch, path: basePath + "/submodel-elements/NoSuchElement/$value", body: `{"value":"valueOnlyPatch"}`},
+		{name: "GET submodel element reference", method: http.MethodGet, path: basePath + "/submodel-elements/NoSuchElement/$reference"},
+		{name: "GET submodel element path", method: http.MethodGet, path: basePath + "/submodel-elements/NoSuchElement/$path"},
+		{name: "GET attachment", method: http.MethodGet, path: basePath + "/submodel-elements/NoSuchElement/attachment"},
+		{name: "PUT attachment", method: http.MethodPut, path: basePath + "/submodel-elements/NoSuchElement/attachment", body: `{"not":"multipart"}`},
+		{name: "DELETE attachment", method: http.MethodDelete, path: basePath + "/submodel-elements/NoSuchElement/attachment"},
+		{name: "POST invoke", method: http.MethodPost, path: basePath + "/submodel-elements/NoSuchElement/invoke", body: `{"inputArguments":[]}`},
+		{name: "POST invoke value", method: http.MethodPost, path: basePath + "/submodel-elements/NoSuchElement/invoke/$value", body: `{"inputArguments":[]}`},
+		{name: "POST invoke async", method: http.MethodPost, path: basePath + "/submodel-elements/NoSuchElement/invoke-async", body: `{"inputArguments":[]}`},
+		{name: "POST invoke async value", method: http.MethodPost, path: basePath + "/submodel-elements/NoSuchElement/invoke-async/$value", body: `{"inputArguments":[]}`},
+		{name: "GET operation status", method: http.MethodGet, path: basePath + "/submodel-elements/NoSuchElement/operation-status/dummyHandle"},
+		{name: "GET operation results", method: http.MethodGet, path: basePath + "/submodel-elements/NoSuchElement/operation-results/dummyHandle"},
+		{name: "GET operation results value", method: http.MethodGet, path: basePath + "/submodel-elements/NoSuchElement/operation-results/dummyHandle/$value"},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			adminStatus, adminBody := runSuperpathRequest(t, tc.method, tc.path, tc.body, tc.contentType, adminToken)
+			require.NotEqualf(t, http.StatusForbidden, adminStatus, "admin must not be forbidden for %s %s; body=%s", tc.method, tc.path, adminBody)
+			require.NotEqualf(t, http.StatusUnauthorized, adminStatus, "admin must be authenticated for %s %s; body=%s", tc.method, tc.path, adminBody)
+
+			userStatus, userBody := runSuperpathRequest(t, tc.method, tc.path, tc.body, tc.contentType, userXToken)
+			require.Equalf(t, http.StatusForbidden, userStatus, "userx must be forbidden for %s %s; body=%s", tc.method, tc.path, userBody)
+		})
+	}
+}
+
+func TestDeniedAttachmentUploadsRejectBeforeMultipartValidationAndSizeEnforcement(t *testing.T) {
+	tokenProvider := testenv.NewPasswordGrantTokenProvider(
+		testKeycloakTokenURL,
+		"basyx-ui",
+		10*time.Second,
+	)
+
+	adminToken, err := tokenProvider.GetAccessToken(&testenv.TokenCredentials{
+		User:     "admin",
+		Password: "pwd",
+	})
+	require.NoError(t, err)
+	userXToken, err := tokenProvider.GetAccessToken(&testenv.TokenCredentials{
+		User:     "userx",
+		Password: "pwd",
+	})
+	require.NoError(t, err)
+
+	attachmentPaths := createAttachmentUploadTargets(t, adminToken)
+
+	oversizedPayload, oversizedContentType := buildAttachmentMultipart(
+		t,
+		bytes.Repeat([]byte("x"), int(common.MultipartRequestSizeLimit(securityUploadMaxSizeBytes))+1),
+	)
+
+	for _, attachmentPath := range attachmentPaths {
+		attachmentPath := attachmentPath
+		t.Run(attachmentPath, func(t *testing.T) {
+			assertAuthorizedUploadStatus(
+				t,
+				attachmentPath,
+				[]byte("not multipart"),
+				"application/json",
+				adminToken,
+				http.StatusBadRequest,
+			)
+			assertAuthorizedUploadStatus(
+				t,
+				attachmentPath,
+				[]byte("not multipart"),
+				"application/json",
+				userXToken,
+				http.StatusForbidden,
+			)
+			assertAuthorizedUploadStatus(
+				t,
+				attachmentPath,
+				oversizedPayload,
+				oversizedContentType,
+				adminToken,
+				http.StatusRequestEntityTooLarge,
+			)
+			assertAuthorizedUploadStatus(
+				t,
+				attachmentPath,
+				oversizedPayload,
+				oversizedContentType,
+				userXToken,
+				http.StatusForbidden,
+			)
+		})
+	}
+}
+
+func createAttachmentUploadTargets(t *testing.T, bearerToken string) []string {
+	t.Helper()
+
+	uniqueID := time.Now().UnixNano()
+	aasID := fmt.Sprintf("urn:test:aas:security:upload-limit:%d", uniqueID)
+	submodelID := fmt.Sprintf("urn:test:submodel:security:upload-limit:%d", uniqueID)
+	encodedAAS := base64.RawURLEncoding.EncodeToString([]byte(aasID))
+	encodedSubmodel := base64.RawURLEncoding.EncodeToString([]byte(submodelID))
+
+	createStoryAAS(t, aasID, "UploadLimitShell", bearerToken)
+	body := fmt.Sprintf(`{
+		"id":%q,
+		"idShort":"UploadLimitSubmodel",
+		"modelType":"Submodel",
+		"kind":"Instance",
+		"submodelElements":[
+			{"idShort":"Document","modelType":"File","contentType":"application/octet-stream"}
+		]
+	}`, submodelID)
+	assertStatus(t, http.MethodPut, testBaseURL+"/shells/"+encodedAAS+"/submodels/"+encodedSubmodel, body, bearerToken, http.StatusCreated)
+
+	return []string{
+		"/submodels/" + encodedSubmodel + "/submodel-elements/Document/attachment",
+		"/shells/" + encodedAAS + "/submodels/" + encodedSubmodel + "/submodel-elements/Document/attachment",
+	}
+}
+
+func buildAttachmentMultipart(t *testing.T, content []byte) ([]byte, string) {
+	t.Helper()
+
+	payload := &bytes.Buffer{}
+	writer := multipart.NewWriter(payload)
+	filePart, err := writer.CreateFormFile("file", "attachment.bin")
+	require.NoError(t, err)
+	_, err = filePart.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	return payload.Bytes(), writer.FormDataContentType()
+}
+
+func assertAuthorizedUploadStatus(
+	t *testing.T,
+	path string,
+	body []byte,
+	contentType string,
+	bearerToken string,
+	expectedStatus int,
+) {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodPut, testBaseURL+path, bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+	req.Header.Set("Content-Type", contentType)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	responseBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equalf(t, expectedStatus, resp.StatusCode, "unexpected upload response: %s", string(responseBody))
+}
+
+func TestABACPolicyManagementRuleLifecycleStories(t *testing.T) {
+	tokenProvider := testenv.NewPasswordGrantTokenProvider(
+		testKeycloakTokenURL,
+		"basyx-ui",
+		10*time.Second,
+	)
+
+	adminToken, err := tokenProvider.GetAccessToken(&testenv.TokenCredentials{User: "admin", Password: "pwd"})
+	require.NoError(t, err)
+	editorToken, err := tokenProvider.GetAccessToken(&testenv.TokenCredentials{User: "userx", Password: "pwd"})
+	require.NoError(t, err)
+
+	assertStatus(t, http.MethodGet, testBaseURL+"/security/abac/policy-versions", "", editorToken, http.StatusNotFound)
+	assertStatus(t, http.MethodGet, testBaseURL+"/security/abac/active-policy", "", editorToken, http.StatusNotFound)
+	assertStatus(t, http.MethodGet, testBaseURL+"/security/abac/active-policy/rules", "", editorToken, http.StatusNotFound)
+	assertStatus(t, http.MethodGet, testBaseURL+"/security/abac/active-policy", "", adminToken, http.StatusOK)
+	assertStatus(t, http.MethodGet, testBaseURL+"/security/abac/active-policy/rules", "", adminToken, http.StatusOK)
+
+	testSuffix := time.Now().UnixNano()
+
+	t.Run("grant and revoke submodel read access over policy activations", func(t *testing.T) {
+		submodelID := fmt.Sprintf("urn:test:sm:abac-policy-grant-revoke:%d", testSuffix)
+		submodelURL := createStorySubmodel(t, submodelID, "ABACPolicyGrantRevokeSubmodel", adminToken)
+
+		assertStatus(t, http.MethodGet, submodelURL, "", editorToken, http.StatusForbidden)
+
+		activeVersionID := activePolicyVersionID(t, adminToken)
+		grantDraftVersionID := clonePolicyVersion(t, activeVersionID, adminToken)
+		grantedRuleIndex := ruleCount(t, grantDraftVersionID, adminToken) + 1
+		createEditorSubmodelReadRule(t, grantDraftVersionID, adminToken)
+		assertStatus(t, http.MethodGet, submodelURL, "", editorToken, http.StatusForbidden)
+		validatePolicyVersion(t, grantDraftVersionID, adminToken)
+		activatePolicyVersion(t, grantDraftVersionID, adminToken)
+		assertStatus(t, http.MethodGet, submodelURL, "", editorToken, http.StatusOK)
+
+		revokeDraftVersionID := clonePolicyVersion(t, activePolicyVersionID(t, adminToken), adminToken)
+		setPolicyRuleEnabled(t, revokeDraftVersionID, grantedRuleIndex, false, adminToken)
+		assertStatus(t, http.MethodGet, submodelURL, "", editorToken, http.StatusOK)
+		validatePolicyVersion(t, revokeDraftVersionID, adminToken)
+		activatePolicyVersion(t, revokeDraftVersionID, adminToken)
+		assertStatus(t, http.MethodGet, submodelURL, "", editorToken, http.StatusForbidden)
+	})
+
+	t.Run("field-based policy activation narrows visible submodels", func(t *testing.T) {
+		visibleSubmodelID := fmt.Sprintf("urn:test:sm:abac-policy-visible:%d", testSuffix)
+		hiddenSubmodelID := fmt.Sprintf("urn:test:sm:abac-policy-hidden:%d", testSuffix)
+		visibleSubmodelURL := createStorySubmodel(t, visibleSubmodelID, "ABACPolicyVisibleSubmodel", adminToken)
+		hiddenSubmodelURL := createStorySubmodel(t, hiddenSubmodelID, "ABACPolicyHiddenSubmodel", adminToken)
+
+		assertStatus(t, http.MethodGet, visibleSubmodelURL, "", editorToken, http.StatusForbidden)
+		assertStatus(t, http.MethodGet, hiddenSubmodelURL, "", editorToken, http.StatusForbidden)
+
+		filterDraftVersionID := clonePolicyVersion(t, activePolicyVersionID(t, adminToken), adminToken)
+		createEditorSubmodelIDReadRule(t, filterDraftVersionID, visibleSubmodelID, adminToken)
+		assertStatus(t, http.MethodGet, visibleSubmodelURL, "", editorToken, http.StatusForbidden)
+		validatePolicyVersion(t, filterDraftVersionID, adminToken)
+		activatePolicyVersion(t, filterDraftVersionID, adminToken)
+
+		assertStatus(t, http.MethodGet, visibleSubmodelURL, "", editorToken, http.StatusOK)
+		assertStatus(t, http.MethodGet, hiddenSubmodelURL, "", editorToken, http.StatusNotFound)
+		assertSubmodelCollectionVisibility(t, editorToken, visibleSubmodelID, hiddenSubmodelID)
+	})
+
+	t.Run("route-derived query grants preserve their exact data scope", func(t *testing.T) {
+		viewerToken, tokenErr := tokenProvider.GetAccessToken(&testenv.TokenCredentials{User: "usera", Password: "pwd"})
+		require.NoError(t, tokenErr)
+
+		aasAID := fmt.Sprintf("urn:test:aas:route-coverage-a:%d", testSuffix)
+		aasBID := fmt.Sprintf("urn:test:aas:route-coverage-b:%d", testSuffix)
+		submodelAID := fmt.Sprintf("urn:test:sm:route-coverage-a:%d", testSuffix)
+		submodelBID := fmt.Sprintf("urn:test:sm:route-coverage-b:%d", testSuffix)
+		submodelAIDShort := fmt.Sprintf("RouteCoverageAllowed%d", testSuffix)
+		submodelBIDShort := fmt.Sprintf("RouteCoverageHidden%d", testSuffix)
+		literalValue := fmt.Sprintf("literal-%d", testSuffix)
+		secretValue := fmt.Sprintf("secret-%d", testSuffix)
+
+		createStoryAAS(t, aasAID, "RouteCoverageA", adminToken)
+		createStoryAAS(t, aasBID, "RouteCoverageB", adminToken)
+		putStorySubmodelUnderAAS(t, aasAID, submodelAID, submodelAIDShort, literalValue, secretValue, adminToken)
+		putStorySubmodelUnderAAS(t, aasBID, submodelBID, submodelBIDShort, "other-literal", "other-secret", adminToken)
+
+		encodedAASA := base64.RawURLEncoding.EncodeToString([]byte(aasAID))
+		encodedAASB := base64.RawURLEncoding.EncodeToString([]byte(aasBID))
+		encodedSubmodelA := base64.RawURLEncoding.EncodeToString([]byte(submodelAID))
+		encodedSubmodelB := base64.RawURLEncoding.EncodeToString([]byte(submodelBID))
+
+		literalRoute := "/submodels/" + encodedSubmodelA + "/submodel-elements/U2VjcmV0"
+		literalVersionID := clonePolicyVersion(t, activePolicyVersionID(t, adminToken), adminToken)
+		literalRuleIndex := createRoleRouteReadRule(t, literalVersionID, "viewer", literalRoute, adminToken)
+		validatePolicyVersion(t, literalVersionID, adminToken)
+		activatePolicyVersion(t, literalVersionID, adminToken)
+
+		assertStatus(t, http.MethodGet, testBaseURL+literalRoute, "", viewerToken, http.StatusOK)
+		assertStatus(t, http.MethodGet, testBaseURL+"/submodels/"+encodedSubmodelA+"/submodel-elements/Secret", "", viewerToken, http.StatusForbidden)
+		assertAuthorizedAASQueryIDs(t, viewerToken, equalsQueryCondition("$sme.U2VjcmV0#value", literalValue), aasAID)
+		assertAuthorizedAASQueryIDs(t, viewerToken, equalsQueryCondition("$sme.Secret#value", secretValue))
+
+		nestedRoute := "/shells/" + encodedAASA + "/submodels/*"
+		nestedVersionID := clonePolicyVersion(t, activePolicyVersionID(t, adminToken), adminToken)
+		setPolicyRuleEnabled(t, nestedVersionID, literalRuleIndex, false, adminToken)
+		nestedRuleIndex := createRoleRouteReadRule(t, nestedVersionID, "viewer", nestedRoute, adminToken)
+		shellRuleIndex := createRoleRouteReadRule(t, nestedVersionID, "viewer", "/shells/"+encodedAASA, adminToken)
+		validatePolicyVersion(t, nestedVersionID, adminToken)
+		activatePolicyVersion(t, nestedVersionID, adminToken)
+
+		assertStatus(t, http.MethodGet, testBaseURL+"/shells/"+encodedAASA+"/submodels/"+encodedSubmodelA, "", viewerToken, http.StatusOK)
+		assertStatus(t, http.MethodGet, testBaseURL+"/shells/"+encodedAASB+"/submodels/"+encodedSubmodelB, "", viewerToken, http.StatusForbidden)
+		assertAuthorizedAASQueryIDs(t, viewerToken, equalsQueryCondition("$sm#idShort", submodelAIDShort), aasAID)
+		assertAuthorizedAASQueryIDs(t, viewerToken, equalsQueryCondition("$sm#idShort", submodelBIDShort))
+
+		referenceRoute := "/submodels/" + encodedSubmodelA + "/$reference"
+		referenceVersionID := clonePolicyVersion(t, activePolicyVersionID(t, adminToken), adminToken)
+		setPolicyRuleEnabled(t, referenceVersionID, nestedRuleIndex, false, adminToken)
+		setPolicyRuleEnabled(t, referenceVersionID, shellRuleIndex, false, adminToken)
+		createRoleRouteReadRule(t, referenceVersionID, "viewer", referenceRoute, adminToken)
+		validatePolicyVersion(t, referenceVersionID, adminToken)
+		activatePolicyVersion(t, referenceVersionID, adminToken)
+
+		assertStatus(t, http.MethodGet, testBaseURL+referenceRoute, "", viewerToken, http.StatusOK)
+		assertStatus(t, http.MethodGet, testBaseURL+"/submodels/"+encodedSubmodelA, "", viewerToken, http.StatusForbidden)
+		assertAuthorizedAASQueryIDs(t, viewerToken, equalsQueryCondition("$sm#id", submodelAID), aasAID)
+		assertAuthorizedAASQueryIDs(t, viewerToken, equalsQueryCondition("$sm#idShort", submodelAIDShort))
+	})
+}
+
+func TestPostSubmodelWithFieldBasedCreateRuleAndRegistrySync(t *testing.T) {
+	tokenProvider := testenv.NewPasswordGrantTokenProvider(testKeycloakTokenURL, "basyx-ui", 10*time.Second)
+	adminToken, err := tokenProvider.GetAccessToken(&testenv.TokenCredentials{User: "admin", Password: "pwd"})
+	require.NoError(t, err)
+	editorToken, err := tokenProvider.GetAccessToken(&testenv.TokenCredentials{User: "userx", Password: "pwd"})
+	require.NoError(t, err)
+
+	baseVersionID := activePolicyVersionID(t, adminToken)
+	for _, testCase := range submodelFieldRuleTestCases("create", time.Now().UnixNano()) {
+		t.Run(testCase.name, func(t *testing.T) {
+			activateEditorSubmodelFieldRule(t, baseVersionID, []string{"CREATE", "UPDATE"}, testCase, adminToken)
+
+			status, response := doAuthorizedRequest(t, http.MethodPost, testBaseURL+"/submodels", testCase.body("FieldCreate"), editorToken)
+			require.Equalf(t, http.StatusCreated, status, "POST /submodels failed: %s", response)
+
+			denied := testCase.nonMatching()
+			status, response = doAuthorizedRequest(t, http.MethodPost, testBaseURL+"/submodels", denied.body("DeniedCreate"), editorToken)
+			require.Equalf(t, http.StatusForbidden, status, "non-matching POST /submodels was not denied: %s", response)
+		})
+	}
+}
+
+func TestSubmodelMutationsWithFieldBasedRulesAndRegistrySync(t *testing.T) {
+	tokenProvider := testenv.NewPasswordGrantTokenProvider(testKeycloakTokenURL, "basyx-ui", 10*time.Second)
+	adminToken, err := tokenProvider.GetAccessToken(&testenv.TokenCredentials{User: "admin", Password: "pwd"})
+	require.NoError(t, err)
+	editorToken, err := tokenProvider.GetAccessToken(&testenv.TokenCredentials{User: "userx", Password: "pwd"})
+	require.NoError(t, err)
+
+	baseVersionID := activePolicyVersionID(t, adminToken)
+	for _, testCase := range submodelFieldRuleTestCases("mutate", time.Now().UnixNano()) {
+		t.Run(testCase.name, func(t *testing.T) {
+			denied := testCase.nonMatching()
+			assertStatus(t, http.MethodPost, testBaseURL+"/submodels", denied.body("DeniedMutation"), adminToken, http.StatusCreated)
+			activateEditorSubmodelFieldRule(t, baseVersionID, []string{"CREATE", "UPDATE", "DELETE"}, testCase, adminToken)
+
+			submodelURL := testCase.url()
+			assertStatus(t, http.MethodPost, testBaseURL+"/submodels", testCase.body("FieldMutation"), editorToken, http.StatusCreated)
+			assertStatus(t, http.MethodPut, submodelURL, testCase.body("FieldMutationPut"), editorToken, http.StatusNoContent)
+			assertStatus(t, http.MethodPatch, submodelURL, testCase.patchBody("FieldMutationPatch"), editorToken, http.StatusNoContent)
+			assertStatus(t, http.MethodPatch, submodelURL+"/$metadata", testCase.patchBody("FieldMutationMetadata"), editorToken, http.StatusNoContent)
+			assertStatus(t, http.MethodDelete, submodelURL, "", editorToken, http.StatusNoContent)
+			assertStatus(t, http.MethodGet, submodelURL, "", adminToken, http.StatusNotFound)
+			assertStatus(t, http.MethodPost, testBaseURL+"/submodels", testCase.body("FieldMutationRecreated"), editorToken, http.StatusCreated)
+
+			assertStatus(t, http.MethodPut, denied.url(), denied.body("DeniedMutationPut"), editorToken, http.StatusForbidden)
+			assertStatus(t, http.MethodDelete, denied.url(), "", editorToken, http.StatusForbidden)
+			assertStatus(t, http.MethodGet, denied.url(), "", adminToken, http.StatusOK)
+		})
+	}
+}
+
+type submodelFieldRuleTestCase struct {
+	name               string
+	field              string
+	submodelID         string
+	supplementalValue  string
+	usesSupplementalID bool
+}
+
+func submodelFieldRuleTestCases(scenario string, uniqueID int64) []submodelFieldRuleTestCase {
+	return []submodelFieldRuleTestCase{
+		{
+			name:       "submodel ID",
+			field:      "$sm#id",
+			submodelID: fmt.Sprintf("urn:test:sm:%s-field-id:%d", scenario, uniqueID),
+		},
+		{
+			name:               "supplemental semantic ID key",
+			field:              "$sm#supplementalSemanticIds[].keys[].value",
+			submodelID:         fmt.Sprintf("urn:test:sm:%s-field-supplemental:%d", scenario, uniqueID),
+			supplementalValue:  fmt.Sprintf("https://example.com/vendor/A/%s/%d", scenario, uniqueID),
+			usesSupplementalID: true,
+		},
+	}
+}
+
+func (c submodelFieldRuleTestCase) ruleValue() string {
+	if c.usesSupplementalID {
+		return c.supplementalValue
+	}
+	return c.submodelID
+}
+
+func (c submodelFieldRuleTestCase) nonMatching() submodelFieldRuleTestCase {
+	c.submodelID += ":denied"
+	if c.usesSupplementalID {
+		c.supplementalValue += ":denied"
+	}
+	return c
+}
+
+func (c submodelFieldRuleTestCase) url() string {
+	return testBaseURL + "/submodels/" + base64.RawURLEncoding.EncodeToString([]byte(c.submodelID))
+}
+
+func (c submodelFieldRuleTestCase) body(idShort string) string {
+	if !c.usesSupplementalID {
+		return fmt.Sprintf(`{"id":%q,"idShort":%q,"modelType":"Submodel"}`, c.submodelID, idShort)
+	}
+	return fmt.Sprintf(`{"id":%q,"idShort":%q,"modelType":"Submodel","supplementalSemanticIds":[{"type":"ModelReference","keys":[{"type":"Submodel","value":%q}]}]}`, c.submodelID, idShort, c.supplementalValue)
+}
+
+func (c submodelFieldRuleTestCase) patchBody(idShort string) string {
+	return fmt.Sprintf(`{"id":%q,"idShort":%q,"modelType":"Submodel"}`, c.submodelID, idShort)
+}
+
+func activateEditorSubmodelFieldRule(t *testing.T, baseVersionID int64, rights []string, testCase submodelFieldRuleTestCase, bearerToken string) {
+	t.Helper()
+	versionID := clonePolicyVersion(t, baseVersionID, bearerToken)
+	createEditorSubmodelFieldRule(t, versionID, rights, testCase.field, testCase.ruleValue(), bearerToken)
+	validatePolicyVersion(t, versionID, bearerToken)
+	activatePolicyVersion(t, versionID, bearerToken)
+}
+
+func createEditorSubmodelFieldRule(t *testing.T, versionID int64, rights []string, field string, value string, bearerToken string) {
+	t.Helper()
+	encodedRights, err := json.Marshal(rights)
+	require.NoError(t, err)
+	body := fmt.Sprintf(`{"rule":{"ACL":{"ATTRIBUTES":[{"CLAIM":"role"}],"RIGHTS":%s,"ACCESS":"ALLOW"},"OBJECTS":[{"ROUTE":"/submodels"},{"ROUTE":"/submodels/*"}],"FORMULA":{"$and":[{"$eq":[{"$attribute":{"CLAIM":"role"}},{"$strVal":"editor"}]},{"$eq":[{"$field":%q},{"$strVal":%q}]}]}}}`, encodedRights, field, value)
+	endpoint := fmt.Sprintf("%s/security/abac/policy-versions/%d/rules", testBaseURL, versionID)
+	status, response := doAuthorizedRequest(t, http.MethodPost, endpoint, body, bearerToken)
+	require.Equalf(t, http.StatusOK, status, "create field-based policy rule failed: %s", response)
+}
+
+func createStorySubmodel(t *testing.T, submodelID string, idShort string, bearerToken string) string {
+	t.Helper()
+
+	encodedSubmodelID := base64.RawURLEncoding.EncodeToString([]byte(submodelID))
+	submodelURL := testBaseURL + "/submodels/" + encodedSubmodelID
+
+	createSubmodelBody := fmt.Sprintf(`{
+		"id":"%s",
+		"idShort":"%s",
+		"modelType":"Submodel",
+		"kind":"Instance",
+		"submodelElements":[]
+	}`, submodelID, idShort)
+
+	assertStatus(t, http.MethodPost, testBaseURL+"/submodels", createSubmodelBody, bearerToken, http.StatusCreated)
+	return submodelURL
+}
+
+func createStoryAAS(t *testing.T, aasID string, idShort string, bearerToken string) {
+	t.Helper()
+
+	body := fmt.Sprintf(`{
+		"id":%q,
+		"idShort":%q,
+		"modelType":"AssetAdministrationShell",
+		"assetInformation":{"assetKind":"Instance"}
+	}`, aasID, idShort)
+	assertStatus(t, http.MethodPost, testBaseURL+"/shells", body, bearerToken, http.StatusCreated)
+}
+
+func putStorySubmodelUnderAAS(
+	t *testing.T,
+	aasID string,
+	submodelID string,
+	idShort string,
+	literalValue string,
+	secretValue string,
+	bearerToken string,
+) {
+	t.Helper()
+
+	body := fmt.Sprintf(`{
+		"id":%q,
+		"idShort":%q,
+		"modelType":"Submodel",
+		"kind":"Instance",
+		"submodelElements":[
+			{"idShort":"U2VjcmV0","modelType":"Property","valueType":"xs:string","value":%q},
+			{"idShort":"Secret","modelType":"Property","valueType":"xs:string","value":%q}
+		]
+	}`, submodelID, idShort, literalValue, secretValue)
+	endpoint := fmt.Sprintf(
+		"%s/shells/%s/submodels/%s",
+		testBaseURL,
+		base64.RawURLEncoding.EncodeToString([]byte(aasID)),
+		base64.RawURLEncoding.EncodeToString([]byte(submodelID)),
+	)
+	assertStatus(t, http.MethodPut, endpoint, body, bearerToken, http.StatusCreated)
+}
+
+func createRoleRouteReadRule(t *testing.T, versionID int64, role string, route string, bearerToken string) int {
+	t.Helper()
+
+	ruleIndex := ruleCount(t, versionID, bearerToken) + 1
+	body := fmt.Sprintf(`{
+		"rule": {
+			"ACL": {
+				"ATTRIBUTES": [{ "CLAIM": "role" }],
+				"RIGHTS": ["READ"],
+				"ACCESS": "ALLOW"
+			},
+			"OBJECTS": [{ "ROUTE": %q }],
+			"FORMULA": {
+				"$eq": [
+					{ "$attribute": { "CLAIM": "role" } },
+					{ "$strVal": %q }
+				]
+			}
+		}
+	}`, route, role)
+	endpoint := fmt.Sprintf("%s/security/abac/policy-versions/%d/rules", testBaseURL, versionID)
+	status, response := doAuthorizedRequest(t, http.MethodPost, endpoint, body, bearerToken)
+	require.Equalf(t, http.StatusOK, status, "create route read rule failed: %s", response)
+	return ruleIndex
+}
+
+func equalsQueryCondition(field string, value string) map[string]any {
+	return map[string]any{
+		"$eq": []any{
+			map[string]any{"$field": field},
+			map[string]any{"$strVal": value},
+		},
+	}
+}
+
+func assertAuthorizedAASQueryIDs(t *testing.T, bearerToken string, condition map[string]any, expectedIDs ...string) {
+	t.Helper()
+
+	body, err := json.Marshal(map[string]any{"$condition": condition})
+	require.NoError(t, err)
+	status, response := doAuthorizedRequest(t, http.MethodPost, testBaseURL+"/query/shells", string(body), bearerToken)
+	require.Equalf(t, http.StatusOK, status, "AAS query failed: %s", response)
+
+	var page struct {
+		Result []struct {
+			ID string `json:"id"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(response), &page))
+	actualIDs := make([]string, 0, len(page.Result))
+	for _, shell := range page.Result {
+		actualIDs = append(actualIDs, shell.ID)
+	}
+	require.ElementsMatch(t, expectedIDs, actualIDs)
+}
+
+func runSuperpathRequest(t *testing.T, method string, path string, body string, contentType string, bearerToken string) (int, string) {
+	t.Helper()
+
+	var bodyReader io.Reader
+	if strings.TrimSpace(body) != "" {
+		bodyReader = strings.NewReader(body)
+	}
+
+	req, err := http.NewRequest(method, testBaseURL+path, bodyReader)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+	if bodyReader != nil {
+		if strings.TrimSpace(contentType) == "" {
+			if method == http.MethodPatch {
+				contentType = "application/merge-patch+json"
+			} else {
+				contentType = "application/json"
+			}
+		}
+		req.Header.Set("Content-Type", contentType)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	return resp.StatusCode, string(respBody)
+}
+
+func activePolicyVersionID(t *testing.T, bearerToken string) int64 {
+	t.Helper()
+
+	status, body := doAuthorizedRequest(t, http.MethodGet, testBaseURL+"/security/abac/policy-versions", "", bearerToken)
+	require.Equalf(t, http.StatusOK, status, "list policy versions failed: %s", body)
+	var versions []struct {
+		VersionID int64  `json:"version_id"`
+		Status    string `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &versions))
+	for _, version := range versions {
+		if version.Status == "active" {
+			return version.VersionID
+		}
+	}
+	t.Fatalf("no active ABAC policy version found: %s", body)
+	return 0
+}
+
+func clonePolicyVersion(t *testing.T, versionID int64, bearerToken string) int64 {
+	t.Helper()
+
+	endpoint := fmt.Sprintf("%s/security/abac/policy-versions/%d/clone", testBaseURL, versionID)
+	status, body := doAuthorizedRequest(t, http.MethodPost, endpoint, "", bearerToken)
+	require.Equalf(t, http.StatusCreated, status, "clone policy failed: %s", body)
+	var version struct {
+		VersionID int64  `json:"version_id"`
+		Status    string `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &version))
+	require.Equal(t, "staged", version.Status)
+	return version.VersionID
+}
+
+func createEditorSubmodelReadRule(t *testing.T, versionID int64, bearerToken string) {
+	t.Helper()
+
+	body := `{
+		"rule": {
+			"ACL": {
+				"ATTRIBUTES": [{ "CLAIM": "role" }],
+				"RIGHTS": ["READ"],
+				"ACCESS": "ALLOW"
+			},
+			"OBJECTS": [{ "ROUTE": "/submodels/*" }],
+			"FORMULA": {
+				"$eq": [
+					{ "$attribute": { "CLAIM": "role" } },
+					{ "$strVal": "editor" }
+				]
+			}
+		}
+	}`
+	endpoint := fmt.Sprintf("%s/security/abac/policy-versions/%d/rules", testBaseURL, versionID)
+	status, response := doAuthorizedRequest(t, http.MethodPost, endpoint, body, bearerToken)
+	require.Equalf(t, http.StatusOK, status, "create policy rule failed: %s", response)
+}
+
+func createEditorSubmodelIDReadRule(t *testing.T, versionID int64, submodelID string, bearerToken string) {
+	t.Helper()
+
+	body := fmt.Sprintf(`{
+		"rule": {
+			"ACL": {
+				"ATTRIBUTES": [{ "CLAIM": "role" }],
+				"RIGHTS": ["READ"],
+				"ACCESS": "ALLOW"
+			},
+			"OBJECTS": [
+				{ "ROUTE": "/submodels" },
+				{ "ROUTE": "/submodels/*" }
+			],
+			"FORMULA": {
+				"$and": [
+					{
+						"$eq": [
+							{ "$attribute": { "CLAIM": "role" } },
+							{ "$strVal": "editor" }
+						]
+					},
+					{
+						"$eq": [
+							{ "$field": "$sm#id" },
+							{ "$strVal": %q }
+						]
+					}
+				]
+			}
+		}
+	}`, submodelID)
+	endpoint := fmt.Sprintf("%s/security/abac/policy-versions/%d/rules", testBaseURL, versionID)
+	status, response := doAuthorizedRequest(t, http.MethodPost, endpoint, body, bearerToken)
+	require.Equalf(t, http.StatusOK, status, "create filtered policy rule failed: %s", response)
+}
+
+func ruleCount(t *testing.T, versionID int64, bearerToken string) int {
+	t.Helper()
+
+	endpoint := fmt.Sprintf("%s/security/abac/policy-versions/%d/rules", testBaseURL, versionID)
+	status, body := doAuthorizedRequest(t, http.MethodGet, endpoint, "", bearerToken)
+	require.Equalf(t, http.StatusOK, status, "list policy rules failed: %s", body)
+	var rules []struct {
+		RuleIndex int `json:"rule_index"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &rules))
+	return len(rules)
+}
+
+func setPolicyRuleEnabled(t *testing.T, versionID int64, ruleIndex int, enabled bool, bearerToken string) {
+	t.Helper()
+
+	body := fmt.Sprintf(`{"enabled":%t}`, enabled)
+	endpoint := fmt.Sprintf("%s/security/abac/policy-versions/%d/rules/%d/enabled", testBaseURL, versionID, ruleIndex)
+	status, response := doAuthorizedRequest(t, http.MethodPut, endpoint, body, bearerToken)
+	require.Equalf(t, http.StatusOK, status, "set policy rule enabled failed: %s", response)
+}
+
+func validatePolicyVersion(t *testing.T, versionID int64, bearerToken string) {
+	t.Helper()
+
+	endpoint := fmt.Sprintf("%s/security/abac/policy-versions/%d/validate", testBaseURL, versionID)
+	status, body := doAuthorizedRequest(t, http.MethodPost, endpoint, "", bearerToken)
+	require.Equalf(t, http.StatusOK, status, "validate policy failed: %s", body)
+	var result struct {
+		Valid bool `json:"valid"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &result))
+	require.Truef(t, result.Valid, "policy validation failed: %s", body)
+}
+
+func activatePolicyVersion(t *testing.T, versionID int64, bearerToken string) {
+	t.Helper()
+
+	endpoint := fmt.Sprintf("%s/security/abac/policy-versions/%d/activate", testBaseURL, versionID)
+	status, body := doAuthorizedRequest(t, http.MethodPost, endpoint, "", bearerToken)
+	require.Equalf(t, http.StatusOK, status, "activate policy failed: %s", body)
+	var version struct {
+		Status string `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &version))
+	require.Equal(t, "active", version.Status)
+}
+
+func assertStatus(t *testing.T, method string, endpoint string, body string, bearerToken string, expectedStatus int) {
+	t.Helper()
+
+	status, response := doAuthorizedRequest(t, method, endpoint, body, bearerToken)
+	require.Equalf(t, expectedStatus, status, "%s %s returned unexpected status: %s", method, endpoint, response)
+}
+
+func assertSubmodelCollectionVisibility(t *testing.T, bearerToken string, visibleSubmodelID string, hiddenSubmodelID string) {
+	t.Helper()
+
+	status, body := doAuthorizedRequest(t, http.MethodGet, testBaseURL+"/submodels", "", bearerToken)
+	require.Equalf(t, http.StatusOK, status, "GET /submodels failed: %s", body)
+
+	var page struct {
+		Result []struct {
+			ID string `json:"id"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &page))
+
+	ids := make([]string, 0, len(page.Result))
+	for _, submodel := range page.Result {
+		ids = append(ids, submodel.ID)
+	}
+	require.Contains(t, ids, visibleSubmodelID)
+	require.NotContains(t, ids, hiddenSubmodelID)
+}
+
+func doAuthorizedRequest(t *testing.T, method string, endpoint string, body string, bearerToken string) (int, string) {
+	t.Helper()
+
+	var reader io.Reader
+	if strings.TrimSpace(body) != "" {
+		reader = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, endpoint, reader)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+	if reader != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, string(respBody)
+}
+
+func runMultipartUploadAction(t *testing.T, step testenv.JSONSuiteStep, tokenProvider testenv.JSONTokenProvider) {
+	file, err := os.Open(step.Data)
+	require.NoError(t, err)
+	defer func() { _ = file.Close() }()
+
+	payload := &bytes.Buffer{}
+	writer := multipart.NewWriter(payload)
+
+	filePart, err := writer.CreateFormFile("file", filepath.Base(step.Data))
+	require.NoError(t, err)
+
+	_, err = io.Copy(filePart, file)
+	require.NoError(t, err)
+
+	err = writer.Close()
+	require.NoError(t, err)
+
+	method := strings.ToUpper(step.Method)
+	if method == "" {
+		method = http.MethodPost
+	}
+
+	req, err := http.NewRequest(method, step.Endpoint, payload)
+	require.NoError(t, err)
+
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	for key, value := range step.Headers {
+		req.Header.Set(key, value)
+	}
+
+	if step.Token != nil {
+		token, tokenErr := tokenProvider.GetAccessToken(step.Token)
+		require.NoError(t, tokenErr)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	expectedStatus := step.ExpectedStatus
+	if expectedStatus == 0 {
+		expectedStatus = http.StatusOK
+	}
+	require.Equalf(t, expectedStatus, resp.StatusCode, "multipart upload failed: %s", string(respBody))
+}
+
+func TestMain(m *testing.M) {
+	runtime := testenv.NewComposeRuntimeOrExit("aasenvironment-security-it", []testenv.PortBinding{
+		{Name: "api", EnvVar: "BASYX_IT_API_PORT"},
+		{Name: "db", EnvVar: "BASYX_IT_DB_PORT"},
+		{Name: "keycloak", EnvVar: "BASYX_IT_KEYCLOAK_PORT"},
+	})
+	testBaseURL = runtime.LocalhostURL("api")
+	testDatabaseURL = runtime.PostgresURL("db", "basyxTestDB")
+	testKeycloakTokenURL = runtime.LocalhostURL("keycloak") + "/realms/basyx/protocol/openid-connect/token"
+	securityEnv := testenv.PrepareSecurityEnvOrExit("security_env", map[string]string{
+		"http://localhost:18080": runtime.LocalhostURL("keycloak"),
+	})
+
+	code := testenv.RunComposeTestMain(m, testenv.ComposeTestMainOptions{
+		ComposeFile:     "docker_compose/docker_compose.yml",
+		ProjectName:     runtime.ProjectName,
+		Env:             runtime.EnvWith("BASYX_IT_SECURITY_ENV=" + securityEnv),
+		PreDownBeforeUp: true,
+		HealthURL:       testBaseURL + "/health",
+		HealthTimeout:   3 * time.Minute,
+	})
+	_ = os.RemoveAll(securityEnv)
+	os.Exit(code)
+}

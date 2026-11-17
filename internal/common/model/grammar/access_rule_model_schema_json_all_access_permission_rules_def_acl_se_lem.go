@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -25,12 +25,14 @@
 
 // Package grammar defines the data structures for representing all access permission rules in the grammar model.
 // Author: Aaron Zielstorff ( Fraunhofer IESE ), Jannik Fried ( Fraunhofer IESE )
+//
+//nolint:all
 package grammar
 
 import (
 	"fmt"
 
-	jsoniter "github.com/json-iterator/go"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
 )
 
 // AccessRuleModelSchemaJSONAllAccessPermissionRulesDEFACLSElem represents an Access Control List (ACL)
@@ -88,9 +90,8 @@ type AccessRuleModelSchemaJSONAllAccessPermissionRulesDEFACLSElem struct {
 //   - error: An error if the JSON is invalid or if either of the required fields ("acl" or "name")
 //     is missing. Returns nil on successful unmarshaling and validation.
 func (j *AccessRuleModelSchemaJSONAllAccessPermissionRulesDEFACLSElem) UnmarshalJSON(value []byte) error {
-	var raw map[string]interface{}
-	var json = jsoniter.ConfigCompatibleWithStandardLibrary
-	if err := json.Unmarshal(value, &raw); err != nil {
+	var raw map[string]any
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &raw); err != nil {
 		return err
 	}
 	if _, ok := raw["acl"]; raw != nil && !ok {
@@ -101,7 +102,7 @@ func (j *AccessRuleModelSchemaJSONAllAccessPermissionRulesDEFACLSElem) Unmarshal
 	}
 	type Plain AccessRuleModelSchemaJSONAllAccessPermissionRulesDEFACLSElem
 	var plain Plain
-	if err := json.Unmarshal(value, &plain); err != nil {
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &plain); err != nil {
 		return err
 	}
 	*j = AccessRuleModelSchemaJSONAllAccessPermissionRulesDEFACLSElem(plain)

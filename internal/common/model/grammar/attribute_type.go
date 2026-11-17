@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -25,12 +25,14 @@
 
 // Package grammar defines the data structures for representing attribute types in the grammar model.
 // Author: Aaron Zielstorff ( Fraunhofer IESE ), Jannik Fried ( Fraunhofer IESE )
+//
+//nolint:all
 package grammar
 
 // ATTRTYPE defines the type classification for attributes in the AAS access control grammar.
 //
 // Attributes in the access control system can be categorized by their source and scope:
-//   - CLAIM: Attributes derived from authentication claims (e.g., JWT claims, user identity)
+//   - CLAIM / CLAIMPATH: Attributes derived from authentication claims (e.g., JWT claims, user identity)
 //   - GLOBAL: Attributes that are globally accessible across the system
 //   - REFERENCE: Attributes that reference AAS model elements or their properties
 //
@@ -43,6 +45,9 @@ const (
 	// These are typically extracted from authentication tokens (e.g., JWT) and include
 	// information about the authenticated user or client, such as user ID, roles, or permissions.
 	ATTRCLAIM ATTRTYPE = "CLAIM"
+
+	// ATTRCLAIMPATH represents a JWT claim selected with an RFC 6901 JSON Pointer.
+	ATTRCLAIMPATH ATTRTYPE = "CLAIMPATH"
 
 	// ATTRGLOBAL represents globally accessible attributes.
 	// These attributes are available system-wide and not tied to specific AAS elements

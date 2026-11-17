@@ -1,0 +1,129 @@
+{
+  "id": "https://example.org/A",
+    "endpoints": [
+        {
+            "protocolInformation": {
+                "href": "hrefA",
+                "endpointProtocol": "http"
+            },
+            "interface": "AAS-3.0"
+        }
+    ],
+    "extensions": [
+        {
+            "name": "help",
+            "valueType": "xs:string",
+            "value": "test"
+        }
+    ],
+  "specificAssetIds": [
+    {
+      "name": "Banane",
+      "value": "248796",
+      "externalSubjectId": {
+        "type": "ExternalReference",
+        "keys": [
+          {
+            "type": "GlobalReference",
+            "value": "PUBLIC_READABLE"
+          },
+          {
+            "type": "GlobalReference",
+            "value": "WRITTEN_BY_X"
+          }
+        ]
+      },
+      "semanticId": {"type": "ExternalReference", "keys": [{"type": "GlobalReference", "value": "ddsfkjn"}]},
+      "supplementalSemanticIds": [
+          {
+              "type": "ExternalReference",
+              "keys": [{"type": "GlobalReference", "value": "sfgjgfd"}]
+          },
+          {
+              "type": "ExternalReference",
+              "keys": [{"type": "GlobalReference", "value": "aoieurhgf"}]
+          }
+      ]
+    },
+    {
+      "name": "Banane",
+      "value": "248797",
+      "externalSubjectId": {
+        "type": "ExternalReference",
+        "keys": [
+          {
+            "type": "GlobalReference",
+            "value": "WRITTEN_BY_Y"
+          }
+        ]
+      },
+      "semanticId": {"type": "ExternalReference", "keys": [{"type": "GlobalReference", "value": "ddsfkjn"}]},
+      "supplementalSemanticIds": [
+          {
+              "type": "ExternalReference",
+              "keys": [{"type": "GlobalReference", "value": "sfgjgfd"}]
+          },
+          {
+              "type": "ExternalReference",
+              "keys": [{"type": "GlobalReference", "value": "aoieurhgf"}]
+          }
+      ]
+    },
+    {
+      "name": "Banane",
+      "value": "fid",
+      "externalSubjectId": {
+        "type": "ExternalReference",
+        "keys": [
+          {
+            "type": "GlobalReference",
+            "value": "PUBLIC_READABLE"
+          },
+          {
+            "type": "GlobalReference",
+            "value": "WRITTEN_BY_X"
+          }
+        ]
+      },
+      "semanticId": {"type": "ExternalReference", "keys": [{"type": "GlobalReference", "value": "ddsfkjn"}]},
+      "supplementalSemanticIds": [
+          {
+              "type": "ExternalReference",
+              "keys": [{"type": "GlobalReference", "value": "sfgjgfd"}]
+          },
+          {
+              "type": "ExternalReference",
+              "keys": [{"type": "GlobalReference", "value": "aoieurhgf"}]
+          }
+      ]
+    },
+    {
+      "name": "do",
+      "value": "248795",
+      "externalSubjectId": {
+        "type": "ExternalReference",
+        "keys": [
+          {
+            "type": "GlobalReference",
+            "value": "PUBLIC_READABLE"
+          },
+          {
+            "type": "GlobalReference",
+            "value": "WRITTEN_BY_X"
+          }
+        ]
+      },
+      "semanticId": {"type": "ExternalReference", "keys": [{"type": "GlobalReference", "value": "ddsfkjn"}]},
+      "supplementalSemanticIds": [
+          {
+              "type": "ExternalReference",
+              "keys": [{"type": "GlobalReference", "value": "sfgjgfd"}]
+          },
+          {
+              "type": "ExternalReference",
+              "keys": [{"type": "GlobalReference", "value": "aoieurhgf"}]
+          }
+      ]
+    }
+  ]
+}

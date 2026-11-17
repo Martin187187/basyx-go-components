@@ -1,0 +1,28 @@
+{
+  "AllAccessPermissionRules": {
+    "rules": [
+      {
+        "ACL": {
+          "ACCESS": "ALLOW",
+          "ATTRIBUTES": [
+            {
+              "CLAIM": "missing-claim"
+            }
+          ],
+          "RIGHTS": [
+            "READ",
+            "UPDATE"
+          ]
+        },
+        "OBJECTS": [
+          {
+            "DESCRIPTOR": "$aasdesc(\"*\")"
+          }
+        ],
+        "FORMULA": {
+          "$boolean": true
+        }
+      }
+    ]
+  }
+}

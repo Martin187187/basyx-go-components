@@ -1,0 +1,58 @@
+{
+  "AllAccessPermissionRules": {
+    "DEFATTRIBUTES": [
+      { "name": "anonymous_attr", "attributes": [{ "GLOBAL": "ANONYMOUS" }] },
+      { "name": "role_attr", "attributes": [{ "CLAIM": "role" }] }
+    ],
+    "DEFOBJECTS": [
+      {
+        "name": "public_description",
+        "objects": [
+          { "ROUTE": "/description" },
+          { "ROUTE": "/health" }
+        ]
+      },
+      {
+        "name": "all_history_demo_api",
+        "objects": [
+          { "ROUTE": "/description" },
+          { "ROUTE": "/health" },
+          { "ROUTE": "/verify" },
+          { "ROUTE": "/serialization" },
+          { "ROUTE": "/upload" },
+          { "ROUTE": "/lookup/shells" },
+          { "ROUTE": "/lookup/shells/*" },
+          { "ROUTE": "/lookup/shellsByAssetLink" },
+          { "ROUTE": "/shells/*/$history" },
+          { "ROUTE": "/submodels/*/$history" },
+          { "DESCRIPTOR": "$aasdesc(\"*\")" },
+          { "DESCRIPTOR": "$smdesc(\"*\")" },
+          { "IDENTIFIABLE": "$aas(\"*\")" },
+          { "IDENTIFIABLE": "$sm(\"*\")" },
+          { "IDENTIFIABLE": "$cd(\"*\")" }
+        ]
+      },
+      {
+        "name": "abac_policy_management",
+        "objects": [
+          { "ROUTE": "/security/abac" },
+          { "ROUTE": "/security/abac/*" }
+        ]
+      }
+    ],
+    "DEFACLS": [
+      { "name": "anonymous_read", "acl": { "USEATTRIBUTES": "anonymous_attr", "RIGHTS": ["READ"], "ACCESS": "ALLOW" } },
+      { "name": "viewer_read", "acl": { "USEATTRIBUTES": "role_attr", "RIGHTS": ["READ"], "ACCESS": "ALLOW" } },
+      { "name": "admin_full", "acl": { "USEATTRIBUTES": "role_attr", "RIGHTS": ["ALL"], "ACCESS": "ALLOW" } }
+    ],
+    "DEFFORMULAS": [
+      { "name": "is_admin", "formula": { "$eq": [{ "$attribute": { "CLAIM": "role" } }, { "$strVal": "admin" }] } },
+      { "name": "is_viewer", "formula": { "$eq": [{ "$attribute": { "CLAIM": "role" } }, { "$strVal": "viewer" }] } }
+    ],
+    "rules": [
+      { "USEACL": "anonymous_read", "USEOBJECTS": ["public_description"], "FORMULA": { "$boolean": true } },
+      { "USEACL": "viewer_read", "USEOBJECTS": ["all_history_demo_api"], "USEFORMULA": "is_viewer" },
+      { "USEACL": "admin_full", "USEOBJECTS": ["all_history_demo_api", "abac_policy_management"], "USEFORMULA": "is_admin" }
+    ]
+  }
+}

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -25,23 +25,30 @@
 
 // Package grammar defines the data structures for representing object items in the grammar model.
 // Author: Aaron Zielstorff ( Fraunhofer IESE ), Jannik Fried ( Fraunhofer IESE )
+//
+//nolint:all
 package grammar
 
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
 )
 
 // AttributeItem represents an attribute in the AAS access control grammar with its type and value.
 //
-// An attribute consists of a Kind (CLAIM, GLOBAL, or REFERENCE) and a Value string.
+// An attribute consists of a Kind (CLAIM, CLAIMPATH, GLOBAL, or REFERENCE) and a Value string.
 // The Kind determines how the Value should be interpreted:
 //   - CLAIM: Value is a claim name from authentication tokens (e.g., "sub", "role")
+//   - CLAIMPATH: Value is an RFC 6901 JSON Pointer into authentication-token claims
 //   - GLOBAL: Value must be one of the predefined global constants (LOCALNOW, UTCNOW, CLIENTNOW, ANONYMOUS)
 //   - REFERENCE: Value is a reference to an AAS model element (e.g., "$sm#idShort")
 //
 // Example JSON representations:
 //   - {"CLAIM": "sub"} - refers to the subject claim from a JWT
+//   - {"CLAIMPATH": "/realm_access/roles"} - refers to a nested JWT claim
 //   - {"GLOBAL": "LOCALNOW"} - refers to the current local time
 //   - {"REFERENCE": "$sm#id"} - refers to the submodel ID
 type AttributeItem struct {
@@ -53,6 +60,7 @@ type AttributeItem struct {
 
 var allowedAttrKeys = map[string]struct{}{
 	string(ATTRCLAIM):     {},
+	string(ATTRCLAIMPATH): {},
 	string(ATTRGLOBAL):    {},
 	string(ATTRREFERENCE): {},
 }
@@ -68,7 +76,7 @@ var allowedGlobalVals = map[string]struct{}{
 //
 // This custom unmarshaler validates the JSON structure and enforces constraints:
 //   - Expects exactly one key-value pair in the JSON object
-//   - Key must be one of: "CLAIM", "GLOBAL", or "REFERENCE"
+//   - Key must be one of: "CLAIM", "CLAIMPATH", "GLOBAL", or "REFERENCE"
 //   - Value must be a string
 //   - For GLOBAL attributes, the value must be one of the allowed constants:
 //     LOCALNOW, UTCNOW, CLIENTNOW, or ANONYMOUS
@@ -90,8 +98,8 @@ var allowedGlobalVals = map[string]struct{}{
 //   - error: An error if the JSON is invalid, has multiple keys, uses an invalid
 //     key or global value, or if the value is not a string. Returns nil on success.
 func (a *AttributeItem) UnmarshalJSON(b []byte) error {
-	var raw map[string]interface{}
-	if err := json.Unmarshal(b, &raw); err != nil {
+	var raw map[string]any
+	if err := common.UnmarshalAndDisallowUnknownFields(b, &raw); err != nil {
 		return err
 	}
 	if len(raw) != 1 {
@@ -100,7 +108,7 @@ func (a *AttributeItem) UnmarshalJSON(b []byte) error {
 
 	for k, v := range raw {
 		if _, ok := allowedAttrKeys[k]; !ok {
-			return fmt.Errorf("AttributeItem: invalid key %q (allowed: CLAIM, GLOBAL, REFERENCE)", k)
+			return fmt.Errorf("AttributeItem: invalid key %q (allowed: CLAIM, CLAIMPATH, GLOBAL, REFERENCE)", k)
 		}
 
 		s, ok := v.(string)
@@ -113,10 +121,44 @@ func (a *AttributeItem) UnmarshalJSON(b []byte) error {
 				return fmt.Errorf("AttributeItem: GLOBAL must be one of LOCALNOW, UTCNOW, CLIENTNOW, ANONYMOUS (got %q)", s)
 			}
 		}
+		if k == string(ATTRREFERENCE) {
+			if err := ValidateReferenceIdentifier(s); err != nil {
+				return err
+			}
+		}
+		if k == string(ATTRCLAIMPATH) {
+			if err := validateClaimPath(s); err != nil {
+				return err
+			}
+		}
 
 		a.Kind = ATTRTYPE(k)
 		a.Value = s
 		break
 	}
 	return nil
+}
+
+func validateClaimPath(pointer string) error {
+	if pointer == "" || !strings.HasPrefix(pointer, "/") {
+		return fmt.Errorf("GRAMMAR-ATTRIBUTE-CLAIMPATH: CLAIMPATH must be a non-empty RFC 6901 JSON Pointer")
+	}
+	for index := 0; index < len(pointer); index++ {
+		if pointer[index] != '~' {
+			continue
+		}
+		if index+1 >= len(pointer) || (pointer[index+1] != '0' && pointer[index+1] != '1') {
+			return fmt.Errorf("GRAMMAR-ATTRIBUTE-CLAIMPATH: CLAIMPATH contains an invalid RFC 6901 escape")
+		}
+		index++
+	}
+	return nil
+}
+
+// MarshalJSON writes AttributeItem in the access-rule grammar form.
+func (a AttributeItem) MarshalJSON() ([]byte, error) {
+	if _, ok := allowedAttrKeys[string(a.Kind)]; !ok {
+		return nil, fmt.Errorf("AttributeItem: invalid kind %q", a.Kind)
+	}
+	return json.Marshal(map[string]string{string(a.Kind): a.Value})
 }

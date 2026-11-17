@@ -1,0 +1,582 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+// Author: Aaron Zielstorff ( Fraunhofer IESE )
+
+package rebacintegration
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"net/http"
+	neturl "net/url"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/doug-martin/goqu/v9"
+	"github.com/stretchr/testify/require"
+)
+
+func TestPatchPreservesFragmentFilteredFields(t *testing.T) {
+	bootstrapCreators(t)
+	id := "urn:rebac-it:patch-mask"
+	target := submodelURL + "/submodels/" + enc(id)
+	expectStatus(t, http.StatusCreated, call(t, "alice", http.MethodPost, submodelURL+"/submodels", idShortSecurityFixture(id), nil), "create fixture")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 15*time.Second)
+		defer cancel()
+		expectStatus(t, http.StatusNoContent, callRawWithContext(ctx, t, "alice", http.MethodDelete, target, nil, "", nil), "delete fixture")
+	})
+
+	filtered := call(t, "userx", http.MethodGet, target, nil, nil)
+	expectStatus(t, http.StatusOK, filtered, "filtered read")
+	require.NotContains(t, filtered.json(t), "semanticId")
+	filteredElement := call(t, "userx", http.MethodGet, target+"/submodel-elements/outside", nil, nil)
+	expectStatus(t, http.StatusOK, filteredElement, "filtered element read")
+	require.NotContains(t, filteredElement.json(t), "semanticId")
+
+	description := []any{map[string]any{"language": "en", "text": "Patched"}}
+	for _, test := range []struct {
+		path string
+		body map[string]any
+	}{
+		{"", map[string]any{"id": id, "idShort": "secured", "modelType": "Submodel", "description": description}},
+		{"/submodel-elements/outside", map[string]any{"idShort": "outside", "modelType": "Property", "valueType": "xs:string", "description": description}},
+		{"/submodel-elements/outside/$metadata", map[string]any{"modelType": "Property", "description": description}},
+	} {
+		expectStatus(t, http.StatusNoContent, call(t, "userx", http.MethodPatch, target+test.path, test.body, nil), "patch "+test.path)
+		owner := call(t, "alice", http.MethodGet, target, nil, nil)
+		expectStatus(t, http.StatusOK, owner, "owner read")
+		model := owner.json(t)
+		require.Contains(t, model, "semanticId")
+		if test.path == "" {
+			require.Equal(t, description, model["description"])
+		}
+		elements := model["submodelElements"].([]any)
+		found := false
+		for _, raw := range elements {
+			element := raw.(map[string]any)
+			if element["idShort"] == "outside" {
+				found = true
+				require.Contains(t, element, "semanticId")
+				if test.path != "" {
+					require.Equal(t, description, element["description"])
+				}
+			}
+		}
+		require.True(t, found)
+	}
+}
+
+func TestSecurityIdentifierMasksAndReBACGrants(t *testing.T) {
+	bootstrapCreators(t)
+	for _, test := range []struct {
+		id      string
+		general bool
+	}{
+		{"urn:rebac-it:idshort-general", true},
+		{"urn:rebac-it:idshort-index", false},
+		{"urn:rebac-it:idshort-union", false},
+	} {
+		t.Run(test.id, func(t *testing.T) {
+			fixture := idShortSecurityFixture(test.id)
+			expectStatus(t, http.StatusCreated, call(t, "alice", http.MethodPost, submodelURL+"/submodels", fixture, nil), "create fixture")
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 15*time.Second)
+				defer cancel()
+				result := callRawWithContext(ctx, t, "alice", http.MethodDelete, submodelURL+"/submodels/"+enc(test.id), nil, "", nil)
+				expectStatus(t, http.StatusNoContent, result, "delete fixture")
+			})
+			target := submodelURL + "/submodels/" + enc(test.id)
+			if test.general {
+				assertMetadataPatchPreservesHiddenFields(t, target, test.id)
+			}
+			storeLegacyListIDShorts(t, test.id)
+			result := call(t, "userx", http.MethodGet, target, nil, nil)
+			expectStatus(t, http.StatusOK, result, "ABAC filtered read")
+			assertSecurityIDShorts(t, result.json(t), !test.general, false, !test.general)
+			if !test.general {
+				return
+			}
+			metadata := call(t, "userx", http.MethodGet, target+"/$metadata", nil, nil)
+			expectStatus(t, http.StatusOK, metadata, "ABAC filtered metadata")
+			assertSecuritySubmodelMetadata(t, metadata.json(t), false)
+
+			query := map[string]any{"$condition": map[string]any{"$eq": []any{map[string]any{"$field": "$sm#id"}, map[string]any{"$strVal": test.id}}}}
+			filtered := call(t, "userx", http.MethodPost, submodelURL+"/query/submodels", query, nil)
+			expectStatus(t, http.StatusOK, filtered, "ABAC filtered query")
+			assertSecurityIDShorts(t, queryResultSubmodel(t, filtered), false, false, false)
+
+			addGrants(t, "alice", submodelAccess(submodelURL, test.id), userGrant(t, "viewer", "userx"))
+			granted := call(t, "userx", http.MethodGet, target, nil, nil)
+			expectStatus(t, http.StatusOK, granted, "ReBAC granted read")
+			assertSecurityIDShorts(t, granted.json(t), true, true, true)
+			query["$filters"] = []any{map[string]any{"$fragment": "$sme.items[0]#idShort", "$condition": map[string]any{"$boolean": false}}}
+			callerFiltered := call(t, "userx", http.MethodPost, submodelURL+"/query/submodels", query, nil)
+			expectStatus(t, http.StatusOK, callerFiltered, "caller filter with ReBAC grant")
+			assertSecurityIDShorts(t, queryResultSubmodel(t, callerFiltered), true, false, true)
+		})
+	}
+}
+
+func idShortSecurityFixture(id string) map[string]any {
+	semantic := map[string]any{"type": "ExternalReference", "keys": []any{map[string]any{"type": "GlobalReference", "value": "urn:security:semantic"}}}
+	outside := property("outside", "visible")
+	outside["semanticId"] = semantic
+	fixture := submodel(id, "secured", outside, map[string]any{
+		"modelType": "SubmodelElementList", "idShort": "items", "typeValueListElement": "SubmodelElementCollection",
+		"value": []any{
+			map[string]any{"modelType": "SubmodelElementCollection", "value": []any{property("name", "first")}},
+			map[string]any{"modelType": "SubmodelElementCollection", "value": []any{property("name", "second")}},
+		},
+	})
+	fixture["semanticId"] = semantic
+	return fixture
+}
+
+func storeLegacyListIDShorts(t *testing.T, id string) {
+	t.Helper()
+	db := openDB(t)
+	dialect := goqu.Dialect("postgres")
+	submodelID := dialect.From("submodel").Select("id").Where(goqu.C("submodel_identifier").Eq(id))
+	for index, name := range []string{"legacyFirst", "legacySecond"} {
+		query, args, err := dialect.From("submodel_element").Select("id", "id_short").
+			Where(goqu.C("submodel_id").Eq(submodelID), goqu.C("idshort_path").Eq("items["+strconv.Itoa(index)+"]")).Prepared(true).ToSQL()
+		require.NoError(t, err)
+		var elementID int64
+		var original sql.NullString
+		require.NoError(t, db.QueryRowContext(t.Context(), query, args...).Scan(&elementID, &original))
+		var originalValue any
+		if original.Valid {
+			originalValue = original.String
+		}
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 15*time.Second)
+			defer cancel()
+			setFixtureElementIDShort(ctx, t, db, elementID, originalValue)
+		})
+		setFixtureElementIDShort(t.Context(), t, db, elementID, name)
+	}
+}
+
+func setFixtureElementIDShort(ctx context.Context, t *testing.T, db *sql.DB, elementID int64, value any) {
+	t.Helper()
+	query, args, err := goqu.Dialect("postgres").Update("submodel_element").
+		Set(goqu.Record{"id_short": value}).Where(goqu.C("id").Eq(elementID)).Prepared(true).ToSQL()
+	require.NoError(t, err)
+	result, err := db.ExecContext(ctx, query, args...)
+	require.NoError(t, err)
+	count, err := result.RowsAffected()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, count)
+}
+
+func queryResultSubmodel(t *testing.T, result response) map[string]any {
+	t.Helper()
+	page := result.json(t)
+	items, ok := page["result"].([]any)
+	require.True(t, ok)
+	require.Len(t, items, 1)
+	model, ok := items[0].(map[string]any)
+	require.True(t, ok)
+	return model
+}
+
+func assertSecurityIDShorts(t *testing.T, model map[string]any, modelVisible, firstVisible, secondVisible bool) {
+	t.Helper()
+	assertSecuritySubmodelMetadata(t, model, modelVisible)
+	elements, ok := model["submodelElements"].([]any)
+	require.True(t, ok)
+	require.Len(t, elements, 2)
+	byIDShort := make(map[string]map[string]any, len(elements))
+	for _, value := range elements {
+		element, ok := value.(map[string]any)
+		require.True(t, ok)
+		id, ok := element["idShort"].(string)
+		require.True(t, ok)
+		byIDShort[id] = element
+	}
+	outside := byIDShort["outside"]
+	require.NotNil(t, outside)
+	require.Equal(t, "outside", outside["idShort"])
+	require.Contains(t, outside, "semanticId")
+	list := byIDShort["items"]
+	require.NotNil(t, list)
+	require.Equal(t, "items", list["idShort"])
+	entries := list["value"].([]any)
+	require.Len(t, entries, 2)
+	for i, visible := range []bool{firstVisible, secondVisible} {
+		entry := entries[i].(map[string]any)
+		if visible {
+			require.Equal(t, []string{"legacyFirst", "legacySecond"}[i], entry["idShort"])
+		} else {
+			require.NotContains(t, entry, "idShort")
+		}
+		children := entry["value"].([]any)
+		require.Equal(t, "name", children[0].(map[string]any)["idShort"])
+	}
+}
+
+func assertSecuritySubmodelMetadata(t *testing.T, model map[string]any, modelVisible bool) {
+	t.Helper()
+	if modelVisible {
+		require.Equal(t, "secured", model["idShort"])
+		require.Contains(t, model, "semanticId")
+	} else {
+		require.NotContains(t, model, "idShort")
+		require.NotContains(t, model, "semanticId")
+	}
+}
+
+func assertMetadataPatchPreservesHiddenFields(t *testing.T, target, submodelID string) {
+	t.Helper()
+	description := []any{map[string]any{"language": "en", "text": "Updated description"}}
+	patch := map[string]any{"id": submodelID, "modelType": "Submodel", "description": description}
+	expectStatus(t, http.StatusNoContent, call(t, "userx", http.MethodPatch, target+"/$metadata", patch, nil), "patch visible metadata")
+	ownerRead := call(t, "alice", http.MethodGet, target, nil, nil)
+	expectStatus(t, http.StatusOK, ownerRead, "owner read after metadata patch")
+	model := ownerRead.json(t)
+	assertSecuritySubmodelMetadata(t, model, true)
+	require.Equal(t, description, model["description"])
+}
+
+func TestDenialsWithoutGrantsLookExactlyLikeABAC(t *testing.T) {
+	existing := createSubmodel(t, submodelURL, "alice", "denial-probe")
+	existingResponse := call(t, "bob", http.MethodGet, submodelURL+"/submodels/"+enc(existing), nil, nil)
+	missingResponse := call(t, "bob", http.MethodGet, submodelURL+"/submodels/"+enc(unique("missing")), nil, nil)
+	expectStatus(t, http.StatusForbidden, existingResponse, "ungranted read")
+	require.Equal(t, missingResponse.status, existingResponse.status, "existence must not leak")
+	require.JSONEq(t, string(missingResponse.body), string(existingResponse.body), "denial bodies must not reveal existence")
+
+	anonymous := call(t, "", http.MethodGet, submodelURL+"/submodels/"+enc(existing), nil, nil)
+	expectStatus(t, http.StatusForbidden, anonymous, "anonymous callers are ABAC-only")
+
+	noCreator := call(t, "eve", http.MethodPost, submodelURL+"/submodels", submodel(unique("sm"), "eve"), nil)
+	expectStatus(t, http.StatusForbidden, noCreator, "create without creator relation or ABAC right")
+
+	unmanaged := call(t, "bob", http.MethodGet, submodelAccess(submodelURL, existing), nil, nil)
+	expectStatus(t, http.StatusNotFound, unmanaged, "$access without can_manage is hidden")
+}
+
+func TestCreatorOwnsAndSharesWithOptimisticConcurrency(t *testing.T) {
+	identifier := createSubmodel(t, submodelURL, "alice", "shared", property("Prop", "1"))
+	target := submodelURL + "/submodels/" + enc(identifier)
+	accessURL := submodelAccess(submodelURL, identifier)
+
+	expectStatus(t, http.StatusOK, call(t, "alice", http.MethodGet, target, nil, nil), "owner reads")
+	grants, etag := readAccess(t, "alice", accessURL)
+	require.Len(t, grants, 1)
+	require.Equal(t, "owner", grants[0].Relation)
+	require.Equal(t, subject(t, "alice"), grants[0].Subject)
+
+	share := map[string]any{"grants": append(grants, userGrant(t, "viewer", "bob"))}
+	expectStatus(t, http.StatusPreconditionRequired, call(t, "alice", http.MethodPut, accessURL+"/grants", share, nil), "missing If-Match")
+	expectStatus(t, http.StatusPreconditionFailed, call(t, "alice", http.MethodPut, accessURL+"/grants", share, map[string]string{"If-Match": `"999"`}), "stale If-Match")
+	shared := call(t, "alice", http.MethodPut, accessURL+"/grants", share, map[string]string{"If-Match": etag})
+	expectStatus(t, http.StatusOK, shared, "share with bob")
+	require.NotEqual(t, etag, shared.header.Get("ETag"), "grant changes must advance the ETag")
+
+	expectStatus(t, http.StatusOK, call(t, "bob", http.MethodGet, target, nil, nil), "viewer reads")
+	expectStatus(t, http.StatusForbidden, call(t, "bob", http.MethodPatch, target, submodel(identifier, "renamed"), nil), "viewer cannot update")
+	expectStatus(t, http.StatusForbidden, call(t, "bob", http.MethodDelete, target, nil, nil), "viewer cannot delete")
+	require.Contains(t, listSubmodelIDs(t, "bob", submodelURL), identifier)
+
+	lastOwner := call(t, "alice", http.MethodPut, accessURL+"/grants", map[string]any{"grants": []grant{userGrant(t, "viewer", "bob")}},
+		map[string]string{"If-Match": shared.header.Get("ETag")})
+	expectStatus(t, http.StatusConflict, lastOwner, "removing the last owner")
+
+	setGrants(t, "alice", accessURL, grants)
+	expectStatus(t, http.StatusForbidden, call(t, "bob", http.MethodGet, target, nil, nil), "revocation takes effect immediately")
+	require.NotContains(t, listSubmodelIDs(t, "bob", submodelURL), identifier, "revocation removes the Submodel from the list")
+}
+
+func TestGroupGrantsUseTokenMembershipAndIssuerIsolation(t *testing.T) {
+	identifier := createSubmodel(t, submodelURL, "alice", "group-shared", property("Prop", "1"))
+	target := submodelURL + "/submodels/" + enc(identifier)
+	addGrants(t, "alice", submodelAccess(submodelURL, identifier),
+		groupGrant("editor", "engineering"),
+		grant{Relation: "viewer", SubjectType: "user", Issuer: "https://other-issuer.example", Subject: subject(t, "bob")},
+	)
+	expectStatus(t, http.StatusNoContent, call(t, "carol", http.MethodPatch, target, submodel(identifier, "patched-by-group"), nil), "group editor updates")
+	expectStatus(t, http.StatusForbidden, call(t, "bob", http.MethodGet, target, nil, nil), "same subject of another issuer gets nothing")
+	expectStatus(t, http.StatusForbidden, call(t, "eve", http.MethodGet, target, nil, nil), "non-member gets nothing")
+}
+
+func TestElementGrantsArePathScoped(t *testing.T) {
+	identifier := createSubmodel(t, submodelURL, "alice", "elements",
+		collection("Outer", collection("Middle", property("Inner", "deep"))),
+		property("Sibling", "sibling"),
+	)
+	elements := submodelURL + "/submodels/" + enc(identifier) + "/submodel-elements"
+	addGrants(t, "alice", elementAccess(submodelURL, identifier, "Outer"), userGrant(t, "viewer", "bob"))
+
+	expectStatus(t, http.StatusForbidden, call(t, "bob", http.MethodGet, submodelURL+"/submodels/"+enc(identifier), nil, nil), "element grant never exposes the Submodel")
+	expectStatus(t, http.StatusOK, call(t, "bob", http.MethodGet, elements+"/Outer", nil, nil), "granted element")
+	expectStatus(t, http.StatusOK, call(t, "bob", http.MethodGet, elements+"/Outer.Middle.Inner", nil, nil), "descendant of granted element")
+	expectStatus(t, http.StatusOK, call(t, "bob", http.MethodGet, elements+"/Outer.Middle.Inner/$value", nil, nil), "descendant value")
+	expectStatus(t, http.StatusForbidden, call(t, "bob", http.MethodGet, elements+"/Sibling", nil, nil), "sibling stays hidden")
+	expectStatus(t, http.StatusForbidden, call(t, "bob", http.MethodPatch, elements+"/Outer.Middle.Inner/$value", "changed", nil), "viewer cannot update elements")
+
+	list := call(t, "bob", http.MethodGet, elements, nil, nil)
+	expectStatus(t, http.StatusOK, list, "element-only list")
+	require.ElementsMatch(t, []string{"Outer"}, resultIDShorts(t, list))
+
+	listed := createSubmodel(t, submodelURL, "alice", "listed", map[string]any{
+		"modelType": "SubmodelElementList", "idShort": "items", "typeValueListElement": "Property", "valueTypeListElement": "xs:string",
+		"value": []any{map[string]any{"modelType": "Property", "valueType": "xs:string", "value": "first"}},
+	})
+	listElements := submodelURL + "/submodels/" + enc(listed) + "/submodel-elements"
+	addGrants(t, "alice", elementAccess(submodelURL, listed, neturl.PathEscape("items[0]")), userGrant(t, "viewer", "bob"))
+	expectStatus(t, http.StatusOK, call(t, "bob", http.MethodGet, listElements+"/"+neturl.PathEscape("items[0]"), nil, nil), "escaped list item paths address the granted item")
+
+	addGrants(t, "alice", elementAccess(submodelURL, identifier, "Sibling"), userGrant(t, "editor", "carol"))
+	expectStatus(t, http.StatusNoContent, call(t, "carol", http.MethodPatch, elements+"/Sibling/$value", "edited", nil), "element editor updates")
+	expectStatus(t, http.StatusForbidden, call(t, "carol", http.MethodPatch, elements+"/Outer.Middle.Inner/$value", "edited", nil), "element grant does not reach siblings")
+}
+
+func TestGrantsSurviveSubmodelPatchAndElementReplacement(t *testing.T) {
+	identifier := createSubmodel(t, submodelURL, "alice", "reconciled",
+		collection("Outer", property("Middle", "before"), property("removed", "gone")),
+		property("Sibling", "sibling"),
+	)
+	target := submodelURL + "/submodels/" + enc(identifier)
+	elements := target + "/submodel-elements"
+	addGrants(t, "alice", submodelAccess(submodelURL, identifier), userGrant(t, "viewer", "carol"))
+	addGrants(t, "alice", elementAccess(submodelURL, identifier, "Outer.Middle"), userGrant(t, "viewer", "bob"))
+
+	patched := submodel(identifier, "patched", collection("Outer", property("Middle", "patched")), property("Sibling", "sibling"))
+	expectStatus(t, http.StatusNoContent, call(t, "alice", http.MethodPatch, target, patched, nil), "owner patches the Submodel")
+	expectStatus(t, http.StatusOK, call(t, "carol", http.MethodGet, target, nil, nil), "Submodel grant survives the PATCH")
+	expectStatus(t, http.StatusOK, call(t, "bob", http.MethodGet, elements+"/Outer.Middle", nil, nil), "element grant survives the PATCH")
+
+	expectStatus(t, http.StatusNoContent, call(t, "alice", http.MethodPut, elements+"/Outer", collection("Outer", property("Middle", "replaced")), nil), "owner replaces the container")
+	expectStatus(t, http.StatusOK, call(t, "carol", http.MethodGet, target, nil, nil), "Submodel grant survives the element PUT")
+	replaced := call(t, "bob", http.MethodGet, elements+"/Outer.Middle", nil, nil)
+	expectStatus(t, http.StatusOK, replaced, "element grant survives the element PUT")
+	require.Equal(t, "replaced", replaced.json(t)["value"])
+	expectStatus(t, http.StatusForbidden, call(t, "bob", http.MethodGet, elements+"/Sibling", nil, nil), "element grant still does not reach siblings")
+}
+
+func TestApprovedAASLinkCarriesAccessUntilReferenceRemoval(t *testing.T) {
+	bootstrapCreators(t)
+	submodelID := createSubmodel(t, environmentURL, "alice", "linked", property("Prop", "1"))
+	shellID := unique("aas")
+	expectStatus(t, http.StatusCreated, call(t, "alice", http.MethodPost, environmentURL+"/shells", shell(shellID, submodelID), nil), "create shell")
+	addGrants(t, "alice", environmentURL+"/shells/"+enc(shellID)+"/$access", userGrant(t, "viewer", "eve"))
+
+	target := environmentURL + "/submodels/" + enc(submodelID)
+	expectStatus(t, http.StatusForbidden, call(t, "eve", http.MethodGet, target, nil, nil), "no inheritance without approved link")
+
+	accessURL := submodelAccess(environmentURL, submodelID)
+	_, etag := readAccess(t, "alice", accessURL)
+	unreferenced := call(t, "alice", http.MethodPut, accessURL+"/inheritance", map[string]any{"aasIds": []string{unique("aas")}}, map[string]string{"If-Match": etag})
+	expectStatus(t, http.StatusBadRequest, unreferenced, "links require an existing reference")
+	approved := call(t, "alice", http.MethodPut, accessURL+"/inheritance", map[string]any{"aasIds": []string{shellID}}, map[string]string{"If-Match": etag})
+	expectStatus(t, http.StatusOK, approved, "approve link")
+
+	expectStatus(t, http.StatusOK, call(t, "eve", http.MethodGet, target, nil, nil), "AAS viewer reads linked Submodel")
+	expectStatus(t, http.StatusOK, call(t, "eve", http.MethodGet, environmentURL+"/shells/"+enc(shellID)+"/submodels/"+enc(submodelID), nil, nil), "superpath read")
+	expectStatus(t, http.StatusForbidden, call(t, "eve", http.MethodPatch, target, submodel(submodelID, "Changed"), nil), "link carries only the AAS relation")
+	expectStatus(t, http.StatusNotFound, call(t, "eve", http.MethodGet, accessURL, nil, nil), "links never carry management")
+
+	removed := call(t, "alice", http.MethodDelete, environmentURL+"/shells/"+enc(shellID)+"/submodel-refs/"+enc(submodelID), nil, nil)
+	expectStatus(t, http.StatusNoContent, removed, "remove reference")
+	expectStatus(t, http.StatusForbidden, call(t, "eve", http.MethodGet, target, nil, nil), "removing the reference removes the link")
+}
+
+func TestFullUnionLiftsABACFiltersOnlyForGrantedResources(t *testing.T) {
+	bootstrapCreators(t)
+	publicID := unique("public")
+	expectStatus(t, http.StatusCreated, call(t, "admin", http.MethodPost, submodelURL+"/submodels",
+		submodel(publicID, "public", property("open", "1"), property("secret", "hidden")), nil), "admin creates ABAC-visible submodel")
+	privateID := createSubmodel(t, submodelURL, "alice", "private", property("open", "1"), property("secret", "shared"))
+
+	public := call(t, "userx", http.MethodGet, submodelURL+"/submodels/"+enc(publicID), nil, nil)
+	expectStatus(t, http.StatusOK, public, "ABAC conditional read")
+	require.ElementsMatch(t, []string{"open"}, elementIDShorts(t, public), "ABAC filter hides secret elements")
+	expectStatus(t, http.StatusNotFound, call(t, "userx", http.MethodGet, submodelURL+"/submodels/"+enc(privateID), nil, nil),
+		"conditional ABAC without ReBAC grant keeps today's not-found result")
+
+	addGrants(t, "alice", submodelAccess(submodelURL, privateID), userGrant(t, "viewer", "userx"))
+	private := call(t, "userx", http.MethodGet, submodelURL+"/submodels/"+enc(privateID), nil, nil)
+	expectStatus(t, http.StatusOK, private, "ReBAC grant")
+	require.ElementsMatch(t, []string{"open", "secret"}, elementIDShorts(t, private), "ReBAC grant lifts ABAC filters of the granted resource")
+	public = call(t, "userx", http.MethodGet, submodelURL+"/submodels/"+enc(publicID), nil, nil)
+	require.ElementsMatch(t, []string{"open"}, elementIDShorts(t, public), "filters of other resources stay in force")
+
+	visible := pagedSubmodelIDs(t, "userx", submodelURL, 1)
+	require.Contains(t, visible, publicID)
+	require.Contains(t, visible, privateID)
+	require.Len(t, visible, len(uniqueStrings(visible)), "paging must not repeat or skip rows")
+}
+
+func TestRevocationKeepsSurvivingABACAccess(t *testing.T) {
+	bootstrapCreators(t)
+	publicID := unique("public")
+	expectStatus(t, http.StatusCreated, call(t, "admin", http.MethodPost, submodelURL+"/submodels", submodel(publicID, "public"), nil), "create")
+	recovery := submodelURL + "/security/rebac/admin/owners/submodel/" + enc(publicID)
+	_, etag := readAccess(t, "dave", submodelAccess(submodelURL, publicID))
+	expectStatus(t, http.StatusOK, call(t, "dave", http.MethodPut, recovery, map[string]any{"owners": []grant{userGrant(t, "owner", "alice")}},
+		map[string]string{"If-Match": etag}), "administrator assigns an owner")
+	addGrants(t, "alice", submodelAccess(submodelURL, publicID), userGrant(t, "viewer", "userx"))
+	current, _ := readAccess(t, "alice", submodelAccess(submodelURL, publicID))
+	remaining := make([]grant, 0, len(current))
+	for _, existing := range current {
+		if existing.Relation == "owner" {
+			remaining = append(remaining, existing)
+		}
+	}
+	setGrants(t, "alice", submodelAccess(submodelURL, publicID), remaining)
+	expectStatus(t, http.StatusOK, call(t, "userx", http.MethodGet, submodelURL+"/submodels/"+enc(publicID), nil, nil), "ABAC access survives revocation")
+}
+
+func TestQueryOperandsOnlySeeVisibleRows(t *testing.T) {
+	serial := unique("serial")
+	visibleID := createSubmodel(t, submodelURL, "alice", "query-visible", property("SerialNumber", serial))
+	hiddenID := createSubmodel(t, submodelURL, "alice", "query-hidden", property("SerialNumber", serial))
+	addGrants(t, "alice", submodelAccess(submodelURL, visibleID), userGrant(t, "viewer", "bob"))
+	for _, test := range []struct {
+		field    string
+		value    string
+		expected []string
+	}{
+		{"$sm#idShort", "query-visible", []string{visibleID}},
+		{"$sm#idShort", "query-hidden", nil},
+		{"$sme.SerialNumber#value", serial, []string{visibleID}},
+	} {
+		query := map[string]any{"$condition": map[string]any{
+			"$eq": []any{map[string]any{"$field": test.field}, map[string]any{"$strVal": test.value}},
+		}}
+		result := call(t, "bob", http.MethodPost, submodelURL+"/query/submodels", query, nil)
+		expectStatus(t, http.StatusOK, result, "query")
+		require.ElementsMatch(t, test.expected, resultIDs(t, result), "%s must match shared rows only, never %s", test.field, hiddenID)
+	}
+}
+
+func TestExcludedRoutesStayABACOnly(t *testing.T) {
+	identifier := createSubmodel(t, submodelURL, "alice", "excluded")
+	addGrants(t, "alice", submodelAccess(submodelURL, identifier), userGrant(t, "owner", "bob"))
+	expectStatus(t, http.StatusOK, call(t, "bob", http.MethodGet, submodelURL+"/submodels/"+enc(identifier), nil, nil), "covered route")
+	for _, excluded := range []string{
+		submodelURL + "/submodels/" + enc(identifier) + "/$history",
+		submodelURL + "/submodels/$recent-changes",
+		submodelURL + "/security/abac/active-policy",
+	} {
+		result := call(t, "bob", http.MethodGet, excluded, nil, nil)
+		require.Containsf(t, []int{http.StatusForbidden, http.StatusNotFound}, result.status, "%s must stay ABAC-only: %s", excluded, string(result.body))
+	}
+}
+
+func listSubmodelIDs(t *testing.T, user string, base string) []string {
+	t.Helper()
+	result := call(t, user, http.MethodGet, base+"/submodels?limit=1000", nil, nil)
+	expectStatus(t, http.StatusOK, result, "list submodels")
+	return resultIDs(t, result)
+}
+
+func pagedSubmodelIDs(t *testing.T, user string, base string, limit int) []string {
+	t.Helper()
+	var ids []string
+	cursor := ""
+	for range 1000 {
+		url := base + "/submodels?limit=" + strconv.Itoa(limit)
+		if cursor != "" {
+			url += "&cursor=" + neturl.QueryEscape(cursor)
+		}
+		result := call(t, user, http.MethodGet, url, nil, nil)
+		expectStatus(t, http.StatusOK, result, "paged list")
+		ids = append(ids, resultIDs(t, result)...)
+		var page struct {
+			PagingMetadata struct {
+				Cursor string `json:"cursor"`
+			} `json:"paging_metadata"`
+		}
+		require.NoError(t, json.Unmarshal(result.body, &page))
+		if page.PagingMetadata.Cursor == "" {
+			return ids
+		}
+		cursor = page.PagingMetadata.Cursor
+	}
+	t.Fatal("pagination did not terminate")
+	return nil
+}
+
+func resultIDs(t *testing.T, result response) []string {
+	t.Helper()
+	var page struct {
+		Result []struct {
+			ID string `json:"id"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(result.body, &page), string(result.body))
+	ids := make([]string, 0, len(page.Result))
+	for _, item := range page.Result {
+		ids = append(ids, item.ID)
+	}
+	return ids
+}
+
+func resultIDShorts(t *testing.T, result response) []string {
+	t.Helper()
+	var page struct {
+		Result []struct {
+			IDShort string `json:"idShort"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(result.body, &page), string(result.body))
+	idShorts := make([]string, 0, len(page.Result))
+	for _, item := range page.Result {
+		idShorts = append(idShorts, item.IDShort)
+	}
+	return idShorts
+}
+
+func elementIDShorts(t *testing.T, result response) []string {
+	t.Helper()
+	var document struct {
+		Elements []struct {
+			IDShort string `json:"idShort"`
+		} `json:"submodelElements"`
+	}
+	require.NoError(t, json.Unmarshal(result.body, &document), string(result.body))
+	idShorts := make([]string, 0, len(document.Elements))
+	for _, element := range document.Elements {
+		idShorts = append(idShorts, element.IDShort)
+	}
+	return idShorts
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	var unique []string
+	for _, value := range values {
+		if _, ok := seen[value]; !ok {
+			seen[value] = struct{}{}
+			unique = append(unique, value)
+		}
+	}
+	return unique
+}

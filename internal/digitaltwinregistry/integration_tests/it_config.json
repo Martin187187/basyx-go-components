@@ -1,0 +1,1093 @@
+[
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors",
+    "data": "postBody/aas_shell.json",
+    "expectedStatus": 403
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors",
+    "data": "postBody/aas_shell.json",
+    "expectedStatus": 403,
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors",
+    "data": "postBody/aas_shell.json",
+    "expectedStatus": 201,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/public_paged_result.json"
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/public_paged_result.json",
+    "token": {
+      "user": "no_bpn_viewer",
+      "password": "pwd"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors/ZTFlYmEzZDctOTFmMC00ZGFjLWE3MzAtZWFhMWQzNWUwMzVjLTI",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/public_result.json",
+    "token": {
+      "user": "no_bpn_viewer",
+      "password": "pwd"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors/ZTFlYmEzZDctOTFmMC00ZGFjLWE3MzAtZWFhMWQzNWUwMzVjLTI",
+    "expectedStatus": 200,
+    "shouldMatch": "postBody/aas_shell.json",
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors/ZTFlYmEzZDctOTFmMC00ZGFjLWE3MzAtZWFhMWQzNWUwMzVjLTI",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/bpnRandom.json",
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors/ZTFlYmEzZDctOTFmMC00ZGFjLWE3MzAtZWFhMWQzNWUwMzVjLTI",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/bpn1.json",
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors/ZTFlYmEzZDctOTFmMC00ZGFjLWE3MzAtZWFhMWQzNWUwMzVjLTI",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/bpn2.json",
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    }
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors",
+    "data": "postBody/aas_shell_no_public_readable.json",
+    "expectedStatus": 201,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    }
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/emptyAssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=",
+    "expectedStatus": 400
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=e30",
+    "expectedStatus": 400
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num1AssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoicGFydEluc3RhbmNlSWQiLCJ2YWx1ZSI6IjI0OTc1NTM5MjAzNDIxIn0",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/empty_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num2AssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6IjIzMTk4MiJ9",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/empty_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num3AssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVySWQiLCJ2YWx1ZSI6IjEyMzgyOTIzOCJ9",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/empty_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num4AssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVyUGFydElkIiwidmFsdWUiOiIyMzE5ODIifQ",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/public_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdAssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdCJ9",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/public_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdAndCustomerPartIdAssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdCJ9&assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6IjIzMTk4MiJ9",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/empty_paged_result.json"
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdCJ9&assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6IjIzMTk4MiJ9",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/empty_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdNoPublicReadableAssetLink.json",
+    "shouldMatch": "expected/lookup/nonPublicId.json",
+    "expectedStatus": 200
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdC1uby1wdWJsaWMtcmVhZGFibGUifQ",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/empty_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdNoPublicReadableAndCustomerPartIdAssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdC1uby1wdWJsaWMtcmVhZGFibGUifQ&assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6Im5vbi1wdWJsaWMtMjMxOTgyIn0",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/empty_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdAssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdCJ9",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    },
+    "shouldMatch": "expected/bpnRandom_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdAndCustomerPartIdAssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdCJ9&assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6IjIzMTk4MiJ9",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/empty_paged_result.json",
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdNoPublicReadableAssetLink.json",
+    "shouldMatch": "expected/lookup/nonPublicId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdC1uby1wdWJsaWMtcmVhZGFibGUifQ",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    },
+    "shouldMatch": "expected/empty_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdNoPublicReadableAndCustomerPartIdAssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdC1uby1wdWJsaWMtcmVhZGFibGUifQ&assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6Im5vbi1wdWJsaWMtMjMxOTgyIn0",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/empty_paged_result.json",
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num3and4AssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVySWQiLCJ2YWx1ZSI6IjEyMzgyOTIzOCJ9&assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVyUGFydElkIiwidmFsdWUiOiIyMzE5ODIifQ",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/empty_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/emptyAssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=",
+    "expectedStatus": 400,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    }
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num1AssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoicGFydEluc3RhbmNlSWQiLCJ2YWx1ZSI6IjI0OTc1NTM5MjAzNDIxIn0",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/empty_paged_result.json",
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    }
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num2AssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6IjIzMTk4MiJ9",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    },
+    "shouldMatch": "expected/bpn1_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num3AssetLink.json",
+    "shouldMatch": "expected/lookup/bothIds.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVySWQiLCJ2YWx1ZSI6IjEyMzgyOTIzOCJ9",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    },
+    "shouldMatch": "expected/bpn1_both_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdAssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdCJ9",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    },
+    "shouldMatch": "expected/bpn1_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdAndCustomerPartIdAssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdCJ9&assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6IjIzMTk4MiJ9",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    },
+    "shouldMatch": "expected/bpn1_paged_result.json"
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdCJ9&assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6Im5vbi1wdWJsaWMtMjMxOTgyIn0",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    },
+    "shouldMatch": "expected/empty_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdNoPublicReadableAndCustomerPartIdAssetLink.json",
+    "shouldMatch": "expected/lookup/nonPublicId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdC1uby1wdWJsaWMtcmVhZGFibGUifQ&assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6Im5vbi1wdWJsaWMtMjMxOTgyIn0",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    },
+    "shouldMatch": "expected/bpn1_non_public_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num4AssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVyUGFydElkIiwidmFsdWUiOiIyMzE5ODIifQ",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    },
+    "shouldMatch": "expected/bpn1_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num3and4AssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVySWQiLCJ2YWx1ZSI6IjEyMzgyOTIzOCJ9&assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVyUGFydElkIiwidmFsdWUiOiIyMzE5ODIifQ",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    },
+    "shouldMatch": "expected/bpn1_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/emptyAssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=",
+    "expectedStatus": 400,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    }
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num1AssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoicGFydEluc3RhbmNlSWQiLCJ2YWx1ZSI6IjI0OTc1NTM5MjAzNDIxIn0",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/empty_paged_result.json",
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    }
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num2AssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6IjIzMTk4MiJ9",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/empty_paged_result.json",
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    }
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num3AssetLink.json",
+    "shouldMatch": "expected/lookup/bothIds.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVySWQiLCJ2YWx1ZSI6IjEyMzgyOTIzOCJ9",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    },
+    "shouldMatch": "expected/bpn2_both_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdAssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdCJ9",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    },
+    "shouldMatch": "expected/bpn2_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdAndCustomerPartIdAssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdCJ9&assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6IjIzMTk4MiJ9",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/empty_paged_result.json",
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    }
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdNoPublicReadableAndCustomerPartIdAssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdC1uby1wdWJsaWMtcmVhZGFibGUifQ&assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6Im5vbi1wdWJsaWMtMjMxOTgyIn0",
+    "expectedStatus": 200,
+    "shouldMatch": "expected/empty_paged_result.json",
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    }
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num4AssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVyUGFydElkIiwidmFsdWUiOiIyMzE5ODIifQ",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    },
+    "shouldMatch": "expected/bpn2_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num3and4AssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVySWQiLCJ2YWx1ZSI6IjEyMzgyOTIzOCJ9&assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVyUGFydElkIiwidmFsdWUiOiIyMzE5ODIifQ",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_002"
+    },
+    "shouldMatch": "expected/bpn2_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/emptyAssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=",
+    "expectedStatus": 400,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    }
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num1AssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoicGFydEluc3RhbmNlSWQiLCJ2YWx1ZSI6IjI0OTc1NTM5MjAzNDIxIn0",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "shouldMatch": "expected/admin_public_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num2AssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6IjIzMTk4MiJ9",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "shouldMatch": "expected/admin_public_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num3AssetLink.json",
+    "shouldMatch": "expected/lookup/bothIds.json",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVySWQiLCJ2YWx1ZSI6IjEyMzgyOTIzOCJ9",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "shouldMatch": "expected/admin_both_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num4AssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVyUGFydElkIiwidmFsdWUiOiIyMzE5ODIifQ",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "shouldMatch": "expected/admin_public_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdAssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdCJ9",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "shouldMatch": "expected/admin_public_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdAndCustomerPartIdAssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdCJ9&assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6IjIzMTk4MiJ9",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "shouldMatch": "expected/admin_public_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdNoPublicReadableAndCustomerPartIdAssetLink.json",
+    "shouldMatch": "expected/lookup/nonPublicId.json",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdC1uby1wdWJsaWMtcmVhZGFibGUifQ&assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6Im5vbi1wdWJsaWMtMjMxOTgyIn0",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "shouldMatch": "expected/admin_non_public_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num3and4AssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVySWQiLCJ2YWx1ZSI6IjEyMzgyOTIzOCJ9&assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVyUGFydElkIiwidmFsdWUiOiIyMzE5ODIifQ",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "shouldMatch": "expected/admin_public_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/emptyAssetLink.json",
+    "shouldMatch": "expected/lookup/emptyId.json",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=",
+    "expectedStatus": 400,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num1AssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoicGFydEluc3RhbmNlSWQiLCJ2YWx1ZSI6IjI0OTc1NTM5MjAzNDIxIn0",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    },
+    "shouldMatch": "expected/admin_public_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num2AssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6IjIzMTk4MiJ9",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    },
+    "shouldMatch": "expected/admin_public_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num3AssetLink.json",
+    "shouldMatch": "expected/lookup/bothIds.json",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVySWQiLCJ2YWx1ZSI6IjEyMzgyOTIzOCJ9",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    },
+    "shouldMatch": "expected/admin_both_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num4AssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVyUGFydElkIiwidmFsdWUiOiIyMzE5ODIifQ",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    },
+    "shouldMatch": "expected/admin_public_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdAndCustomerPartIdAssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdCJ9&assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6IjIzMTk4MiJ9",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    },
+    "shouldMatch": "expected/admin_public_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/globalAssetIdNoPublicReadableAndCustomerPartIdAssetLink.json",
+    "shouldMatch": "expected/lookup/nonPublicId.json",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoiZ2xvYmFsQXNzZXRJZCIsInZhbHVlIjoidGVzdC1uby1wdWJsaWMtcmVhZGFibGUifQ&assetIds=eyJuYW1lIjoiY3VzdG9tZXJQYXJ0SWQiLCJ2YWx1ZSI6Im5vbi1wdWJsaWMtMjMxOTgyIn0",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    },
+    "shouldMatch": "expected/admin_non_public_paged_result.json"
+  },
+  {
+    "method": "POST",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shellsByAssetLink",
+    "data": "postBody/num3and4AssetLink.json",
+    "shouldMatch": "expected/lookup/publicId.json",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/shell-descriptors?assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVySWQiLCJ2YWx1ZSI6IjEyMzgyOTIzOCJ9&assetIds=eyJuYW1lIjoibWFudWZhY3R1cmVyUGFydElkIiwidmFsdWUiOiIyMzE5ODIifQ",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    },
+    "shouldMatch": "expected/admin_public_paged_result.json"
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shells/ZTFlYmEzZDctOTFmMC00ZGFjLWE3MzAtZWFhMWQzNWUwMzVjLTI",
+    "expectedStatus": 200
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shells/ZTFlYmEzZDctOTFmMC00ZGFjLWE3MzAtZWFhMWQzNWUwMzVjLTI",
+    "expectedStatus": 200,
+    "headers": {
+      "Edc-Bpn": "BPN_COMPANY_001"
+    }
+  },
+  {
+    "method": "GET",
+    "endpoint": "{{BASYX_IT_API_URL}}/lookup/shells/ZTFlYmEzZDctOTFmMC00ZGFjLWE3MzAtZWFhMWQzNWUwMzVjLTI",
+    "expectedStatus": 200,
+    "token": {
+      "user": "admin",
+      "password": "pwd"
+    },
+    "headers": {
+      "Edc-Bpn": "BPNL00000000015G"
+    }
+  }
+]

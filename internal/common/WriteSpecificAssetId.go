@@ -1,0 +1,183 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+// Author: Martin Stemmer ( Fraunhofer IESE )
+
+package common
+
+import (
+	"database/sql"
+	"fmt"
+
+	"github.com/FriedJannik/aas-go-sdk/types"
+	"github.com/doug-martin/goqu/v9"
+)
+
+// CreateSpecificAssetIDDescriptor stores specific asset IDs for a descriptor
+// and links them to the optional AAS reference.
+func CreateSpecificAssetIDDescriptor(tx *sql.Tx, descriptorID int64, aasRef sql.NullInt64, specificAssetIDs []types.ISpecificAssetID) error {
+	return InsertSpecificAssetIDs(
+		tx,
+		sql.NullInt64{Int64: descriptorID, Valid: true},
+		sql.NullInt64{},
+		aasRef,
+		specificAssetIDs,
+	)
+}
+
+// CreateSpecificAssetIDForAssetInformation stores specific asset IDs for an
+// asset information record.
+func CreateSpecificAssetIDForAssetInformation(
+	tx *sql.Tx,
+	assetInformationID int64,
+	specificAssetIDs []types.ISpecificAssetID,
+) error {
+	return InsertSpecificAssetIDs(
+		tx,
+		sql.NullInt64{},
+		sql.NullInt64{Int64: assetInformationID, Valid: true},
+		sql.NullInt64{},
+		specificAssetIDs,
+	)
+}
+
+// InsertSpecificAssetIDs inserts specific asset IDs with either a descriptor
+// owner or an asset information owner, including related references and payload
+// records.
+func InsertSpecificAssetIDs(
+	tx *sql.Tx,
+	descriptorID sql.NullInt64,
+	assetInformationID sql.NullInt64,
+	aasRef sql.NullInt64,
+	specificAssetIDs []types.ISpecificAssetID,
+) error {
+	return InsertSpecificAssetIDsWithPositionStart(
+		tx,
+		descriptorID,
+		assetInformationID,
+		aasRef,
+		specificAssetIDs,
+		0,
+	)
+}
+
+// InsertSpecificAssetIDsWithPositionStart inserts specific asset IDs while
+// assigning positions starting from positionStart.
+func InsertSpecificAssetIDsWithPositionStart(
+	tx *sql.Tx,
+	descriptorID sql.NullInt64,
+	assetInformationID sql.NullInt64,
+	aasRef sql.NullInt64,
+	specificAssetIDs []types.ISpecificAssetID,
+	positionStart int,
+) error {
+	if descriptorID.Valid && assetInformationID.Valid {
+		return fmt.Errorf("insert into specific_asset_id: descriptor_id and asset_information_id must not both be set")
+	}
+	if specificAssetIDs == nil {
+		return nil
+	}
+	if len(specificAssetIDs) > 0 {
+		d := goqu.Dialect(Dialect)
+		for i, val := range specificAssetIDs {
+			var err error
+			position := positionStart + i
+
+			sqlStr, args, err := d.
+				Insert(TblSpecificAssetID).
+				Rows(goqu.Record{
+					ColDescriptorID:       descriptorID,
+					ColAssetInformationID: assetInformationID,
+					ColPosition:           position,
+					ColName:               val.Name(),
+					ColValue:              val.Value(),
+					ColAASRef:             aasRef,
+				}).
+				Returning(TSpecificAssetID.Col(ColID)).
+				ToSQL()
+			if err != nil {
+				return err
+			}
+			var id int64
+			if err = tx.QueryRow(sqlStr, args...).Scan(&id); err != nil {
+				return err
+			}
+
+			if err = CreateContextReference(
+				tx,
+				id,
+				val.ExternalSubjectID(),
+				"specific_asset_id_external_subject_id_reference",
+				"specific_asset_id_external_subject_id_reference_key",
+			); err != nil {
+				return err
+			}
+
+			if err = createSpecificAssetIDSemanticIDPayload(tx, id, val.SemanticID()); err != nil {
+				return err
+			}
+
+			if err = createSpecificAssetIDSupplementalSemantic(tx, id, val.SupplementalSemanticIDs()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// createSpecificAssetIDSemanticIDPayload stores the optional SpecificAssetID
+// semanticId payload in semantic_id_payload.
+func createSpecificAssetIDSemanticIDPayload(tx *sql.Tx, specificAssetID int64, semanticID types.IReference) error {
+	d := goqu.Dialect(Dialect)
+	insertRecord := goqu.Record{
+		ColSpecificAssetID: specificAssetID,
+	}
+
+	if semanticID != nil {
+		semanticIDPayload, err := buildReferencePayload(semanticID)
+		if err != nil {
+			return err
+		}
+		insertRecord["semantic_id_payload"] = goqu.L("?::jsonb", string(semanticIDPayload))
+	}
+
+	sqlStr, args, err := d.Insert(TblSpecificAssetIDPayload).Rows(insertRecord).ToSQL()
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(sqlStr, args...)
+	return err
+}
+
+// createSpecificAssetIDSupplementalSemantic stores supplemental semantic IDs
+// for a specific asset ID.
+func createSpecificAssetIDSupplementalSemantic(tx *sql.Tx, specificAssetID int64, references []types.IReference) error {
+	return CreateContextReferences1ToMany(
+		tx,
+		specificAssetID,
+		references,
+		TblSpecificAssetIDSuppSemantic,
+		ColSpecificAssetIDID,
+	)
+}

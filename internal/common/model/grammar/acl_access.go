@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -25,12 +25,15 @@
 
 // Package grammar defines the data structures for representing access control lists in the grammar model.
 // Author: Aaron Zielstorff ( Fraunhofer IESE ), Jannik Fried ( Fraunhofer IESE )
+//
+//nolint:all
 package grammar
 
 import (
-	"encoding/json"
 	"fmt"
 	"reflect"
+
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
 )
 
 // ACLACCESS defines the access mode for an Access Control List (ACL) entry.
@@ -71,7 +74,7 @@ var enumValuesACLACCESS = []interface{}{
 //     enum values. Returns nil on successful unmarshaling and validation.
 func (j *ACLACCESS) UnmarshalJSON(value []byte) error {
 	var v string
-	if err := json.Unmarshal(value, &v); err != nil {
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &v); err != nil {
 		return err
 	}
 	var ok bool
@@ -93,8 +96,9 @@ func (j *ACLACCESS) UnmarshalJSON(value []byte) error {
 // This custom unmarshaler validates that the ACL JSON object contains the required fields:
 //   - ACCESS: The access mode (ALLOW or DISABLED)
 //   - RIGHTS: The rights/permissions being granted or denied
+//   - At least one of ATTRIBUTES or USEATTRIBUTES
 //
-// Both fields are mandatory and their absence will result in an error.
+// ACCESS and RIGHTS are mandatory, and at least one of ATTRIBUTES/USEATTRIBUTES must be present.
 //
 // Parameters:
 //   - value: JSON byte slice containing the ACL object to unmarshal
@@ -103,8 +107,8 @@ func (j *ACLACCESS) UnmarshalJSON(value []byte) error {
 //   - error: An error if the JSON is invalid or if required fields (ACCESS or RIGHTS) are missing.
 //     Returns nil on successful unmarshaling and validation.
 func (j *ACL) UnmarshalJSON(value []byte) error {
-	var raw map[string]interface{}
-	if err := json.Unmarshal(value, &raw); err != nil {
+	var raw map[string]any
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &raw); err != nil {
 		return err
 	}
 	if _, ok := raw["ACCESS"]; raw != nil && !ok {
@@ -113,9 +117,14 @@ func (j *ACL) UnmarshalJSON(value []byte) error {
 	if _, ok := raw["RIGHTS"]; raw != nil && !ok {
 		return fmt.Errorf("field RIGHTS in ACL: required")
 	}
+	_, hasAttributes := raw["ATTRIBUTES"]
+	_, hasUseAttributes := raw["USEATTRIBUTES"]
+	if !hasAttributes && !hasUseAttributes {
+		return fmt.Errorf("ACL: ATTRIBUTES or USEATTRIBUTES must be defined")
+	}
 	type Plain ACL
 	var plain Plain
-	if err := json.Unmarshal(value, &plain); err != nil {
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &plain); err != nil {
 		return err
 	}
 	*j = ACL(plain)

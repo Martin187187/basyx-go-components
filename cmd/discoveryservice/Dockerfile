@@ -1,56 +1,55 @@
-# Stage 1: Build the application
-FROM golang:1.25-alpine AS builder
+# syntax=docker/dockerfile:1
 
-# Version argument for build-time injection
-ARG VERSION=dev
+# Stage 1: Build the application
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETVARIANT
 
 RUN apk update && apk add --no-cache git ca-certificates && update-ca-certificates
 WORKDIR /app
 
 # Dependencies first (better layer caching)
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
-# Copy full source
-COPY . .
+COPY cmd/discoveryservice ./cmd/discoveryservice
+COPY internal ./internal
+COPY pkg ./pkg
 
-# Build discoveryservice binary with version information
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
-    -ldflags "-X main.Version=${VERSION} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+# Build discoveryservice binary
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOARM=${TARGETVARIANT#v} go build -trimpath \
     -o discoveryservice ./cmd/discoveryservice
 
-# Stage 2: Minimal runtime image
-FROM alpine:latest
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOARM=${TARGETVARIANT#v} go build -trimpath \
+    -o healthprobe ./internal/healthprobe
 
-RUN apk --no-cache add ca-certificates wget
-WORKDIR /root/
+# Stage 2: Distroless runtime image
+FROM gcr.io/distroless/static:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931
 
-# Copy binary
-COPY --from=builder /app/discoveryservice /root/discoveryservice
+WORKDIR /app
 
-# Config + schema expected by your code:
-# Your code reads schema from: getwd() + "/resources/sql/discoveryschema.sql"
-# With WORKDIR=/root, that becomes /root/resources/sql/discoveryschema.sql
-RUN mkdir -p /config /root/resources/sql
-
-# Copy default config and SQL schema for discovery service
+# Copy runtime artifacts
+COPY --from=builder /app/discoveryservice /app/discoveryservice
 COPY --from=builder /app/cmd/discoveryservice/config.yaml /config/config.yaml
-COPY --from=builder /app/cmd/discoveryservice/resources/sql/discoveryschema.sql /root/resources/sql/discoveryschema.sql
 
-# Optional healthcheck script for /health
-# If you have one in the discoveryservice folder, copy it; otherwise you can omit.
-COPY --from=builder /app/cmd/discoveryservice/healthcheck.sh /root/healthcheck.sh
-RUN chmod +x /root/healthcheck.sh || true
+COPY --from=builder /app/healthprobe /bin/healthprobe
+COPY --from=builder /app/healthprobe /bin/wget
 
 # Default port (override via env in compose)
 ENV SERVER_PORT=5004
 
-# NOTE: EXPOSE doesn't accept env vars at runtime; this is just documentation.
-EXPOSE 5004
+EXPOSE ${SERVER_PORT}
 
 # Start service with config
-CMD ["/root/discoveryservice", "-config", "/config/config.yaml"]
+CMD ["/app/discoveryservice", "-config", "/config/config.yaml"]
 
-# Health check (if script exists and your service serves /health)
+# Health check runs via healthprobe
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD /root/healthcheck.sh || wget -qO- http://127.0.0.1:${SERVER_PORT}/health || exit 1
+    CMD ["/bin/healthprobe"]

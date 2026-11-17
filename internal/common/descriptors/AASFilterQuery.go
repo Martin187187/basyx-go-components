@@ -1,0 +1,90 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+// Author: Martin Stemmer ( Fraunhofer IESE )
+
+package descriptors
+
+import (
+	"github.com/doug-martin/goqu/v9"
+	"github.com/doug-martin/goqu/v9/exp"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model/grammar"
+)
+
+var (
+	specificAssetIDAlias            = goqu.T(common.TblSpecificAssetID).As(common.AliasSpecificAssetID)
+	aasDescriptorEndpointAlias      = goqu.T(common.TblAASDescriptorEndpoint).As(common.AliasAASDescriptorEndpoint)
+	submodelDescriptorAlias         = goqu.T(common.TblSubmodelDescriptor).As(common.AliasSubmodelDescriptor)
+	submodelDescriptorEndpointAlias = goqu.T(common.TblAASDescriptorEndpoint).As(common.AliasSubmodelDescriptorEndpoint)
+	companyDescriptorAlias          = goqu.T(common.TblCompanyDescriptor).As(common.AliasCompanyDescriptor)
+	companyDescriptorEndpointAlias  = goqu.T(common.TblAASDescriptorEndpoint).As(common.AliasCompanyDescriptorEndpoint)
+)
+
+type submodelDescriptorChildFilterCollectors struct {
+	aas        *grammar.ResolvedFieldPathCollector
+	standalone *grammar.ResolvedFieldPathCollector
+}
+
+func newSubmodelDescriptorChildFilterCollectors(
+	inlineAliases ...string,
+) (submodelDescriptorChildFilterCollectors, error) {
+	aasCollector, err := grammar.NewResolvedFieldPathCollectorForNestedSMDesc()
+	if err != nil {
+		return submodelDescriptorChildFilterCollectors{}, err
+	}
+	aasCollector.SetNonMatchRootJoinKey(common.AliasSubmodelDescriptor, common.ColAASDescriptorID)
+	aasCollector.AllowInlineAliases(inlineAliases...)
+	aasCollector.AllowInlineAliases(common.TblAASDescriptor)
+
+	standaloneCollector, err := grammar.NewResolvedFieldPathCollectorForRoot(grammar.CollectorRootSMDesc)
+	if err != nil {
+		return submodelDescriptorChildFilterCollectors{}, err
+	}
+	standaloneCollector.AllowInlineAliases(inlineAliases...)
+
+	return submodelDescriptorChildFilterCollectors{
+		aas:        aasCollector,
+		standalone: standaloneCollector,
+	}, nil
+}
+
+// joinAASDescriptor brings the shell descriptor identified by aasDescriptorID
+// into scope. Shell-level fields of $aasdesc# fragment conditions, such as
+// $aasdesc#id, render as aas_descriptor columns, so every query that applies
+// such a condition to rows of a derived table or of a submodel descriptor needs
+// this join.
+func joinAASDescriptor(
+	ds *goqu.SelectDataset,
+	aasDescriptorID exp.IdentifierExpression,
+) *goqu.SelectDataset {
+	return ds.LeftJoin(
+		common.TAASDescriptor,
+		goqu.On(common.TAASDescriptor.Col(common.ColDescriptorID).Eq(aasDescriptorID)),
+	)
+}
+
+func joinSubmodelDescriptorOwningAASDescriptor(ds *goqu.SelectDataset) *goqu.SelectDataset {
+	return joinAASDescriptor(ds, submodelDescriptorAlias.Col(common.ColAASDescriptorID))
+}

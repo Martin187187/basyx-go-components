@@ -1,0 +1,265 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
+package persistence
+
+import (
+	"errors"
+	"regexp"
+	"strings"
+	"testing"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/doug-martin/goqu/v9"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model/grammar"
+	auth "github.com/eclipse-basyx/basyx-go-components/internal/common/security"
+	"github.com/stretchr/testify/require"
+)
+
+func TestAASRepositoryReadPoolSelection(t *testing.T) {
+	writer, _, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = writer.Close() }()
+	reader, _, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = reader.Close() }()
+
+	backend, err := NewAssetAdministrationShellDatabaseFromPools(writer, reader, "off")
+	require.NoError(t, err)
+	require.Same(t, reader, backend.readDB(t.Context()))
+	require.Same(t, writer, backend.readDB(common.WithWriterPostgresReads(t.Context())))
+}
+
+func TestGetDPPIDsByAssetAndMetadataSemanticIDsDatasetUsesDPPIDCursor(t *testing.T) {
+	dialect := goqu.Dialect("postgres")
+	query, err := buildGetDPPIDsByAssetAndMetadataSemanticIDsDataset(
+		&dialect,
+		[]string{"product-1"},
+		[]string{"urn:samm:io.admin-shell.idta.dpp_meta:1.0.0#DppMetadata"},
+		10,
+		"https://example.org/dpps/41",
+	)
+	require.NoError(t, err)
+	sqlQuery, sqlArgs, err := query.Prepared(true).ToSQL()
+
+	require.NoError(t, err)
+	require.Len(t, sqlArgs, 6)
+	require.Contains(t, sqlQuery, `SELECT DISTINCT "metadata_property"."value_text"`)
+	require.Contains(t, sqlQuery, `"metadata_property"."value_text" > $5`)
+	require.Contains(t, sqlQuery, `ORDER BY "metadata_property"."value_text" ASC`)
+	require.True(t, strings.HasSuffix(sqlQuery, "LIMIT $6"))
+}
+
+func TestGetDPPAssetIdentifiersDatasetSelectsOwningAASAndVisibleDPPID(t *testing.T) {
+	dialect := goqu.Dialect("postgres")
+	dataset, err := buildGetDPPAssetIdentifiersDataset(
+		&dialect,
+		[]string{"product-1"},
+		[]string{"urn:samm:io.admin-shell.idta.dpp_meta:1.0.0#DppMetadata"},
+		1,
+	)
+	require.NoError(t, err)
+	query, args, err := dataset.Prepared(true).ToSQL()
+
+	require.NoError(t, err)
+	require.Len(t, args, 5)
+	require.Contains(t, query, `SELECT DISTINCT "aas"."aas_id", "metadata_property"."value_text"`)
+	require.Contains(t, query, `"metadata_semantic_id_key"."value" = ANY`)
+	require.Contains(t, query, `"asset_information"."global_asset_id" = ANY`)
+	require.Contains(t, query, `"metadata_property"."value_text" IS NOT NULL`)
+	require.Contains(t, query, `"metadata_property"."value_text" != $`)
+	require.Contains(t, query, `"submodel_reference_key"."position" IN (SELECT MAX("terminal_submodel_reference_key"."position")`)
+	require.Contains(t, query, `"metadata_semantic_id_key"."position" IN (SELECT MAX("terminal_metadata_semantic_id_key"."position")`)
+	require.Contains(t, query, `ORDER BY "aas"."aas_id" ASC, "metadata_property"."value_text" ASC`)
+	require.True(t, strings.HasSuffix(query, "LIMIT $5"))
+	require.Equal(t, int64(2), args[4])
+}
+
+func TestDPPIDLookupAuthorizationFiltersMaskedValueBeforePagination(t *testing.T) {
+	t.Parallel()
+
+	deny := false
+	sqlQuery, sqlArgs := buildAuthorizedDPPIDLookupSQL(
+		t,
+		"$sme.digitalProductPassportId#value",
+		grammar.LogicalExpression{Boolean: &deny},
+	)
+
+	require.Contains(t, sqlQuery, `"metadata_element"."idshort_path"`)
+	require.Contains(t, sqlArgs, false)
+	require.Less(t, strings.Index(sqlQuery, "WHERE"), strings.Index(sqlQuery, "ORDER BY"))
+	require.Less(t, strings.Index(sqlQuery, "WHERE"), strings.Index(sqlQuery, "LIMIT"))
+}
+
+func TestDPPIDLookupAuthorizationHonorsRootValueMask(t *testing.T) {
+	t.Parallel()
+
+	deny := false
+	_, sqlArgs := buildAuthorizedDPPIDLookupSQL(t, "$sme#value", grammar.LogicalExpression{Boolean: &deny})
+
+	require.Contains(t, sqlArgs, false)
+}
+
+func TestDPPIDLookupAuthorizationCorrelatesPathMaskToMetadataRow(t *testing.T) {
+	t.Parallel()
+
+	field := grammar.ModelStringPattern("$sme.digitalProductPassportId#value")
+	hiddenID := grammar.StandardString("https://www.example.org/dpp/security-search-b")
+	condition := grammar.LogicalExpression{Ne: grammar.ComparisonItems{
+		{Field: &field},
+		{StrVal: &hiddenID},
+	}}
+	sqlQuery, sqlArgs := buildAuthorizedDPPIDLookupSQL(t, grammar.FragmentStringPattern(field), condition)
+
+	require.Contains(t, sqlQuery, `"submodel_element"."submodel_id" = "metadata_element"."submodel_id"`)
+	require.Contains(t, sqlQuery, `"submodel_element"."idshort_path"`)
+	require.Contains(t, sqlQuery, "property_element.value_text")
+	require.Contains(t, sqlArgs, string(hiddenID))
+}
+
+func TestDPPIDVisibilityFilterContextCombinesStructuralAndIDShortMasks(t *testing.T) {
+	t.Parallel()
+
+	allow := true
+	deny := false
+	ctx := auth.WithQueryFilter(t.Context(), &auth.QueryFilter{Filters: auth.FragmentFilters{
+		"$sme.digitalProductPassportId":         auth.NewFragmentFilterPredicate(grammar.LogicalExpression{Boolean: &allow}, false),
+		"$sme.digitalProductPassportId#idShort": auth.NewFragmentFilterPredicate(grammar.LogicalExpression{Boolean: &deny}, false),
+	}})
+
+	queryFilter := auth.GetQueryFilter(dppIDVisibilityFilterContext(ctx))
+	entries := queryFilter.FilterPredicateEntriesFor("$sme.digitalProductPassportId#idShort")
+	require.Len(t, entries, 1)
+	require.Len(t, entries[0].Predicate.And, 2)
+}
+
+func buildAuthorizedDPPIDLookupSQL(
+	t *testing.T,
+	fragment grammar.FragmentStringPattern,
+	condition grammar.LogicalExpression,
+) (string, []any) {
+	t.Helper()
+
+	ctx := auth.WithQueryFilter(contextWithConfig(), &auth.QueryFilter{Filters: auth.FragmentFilters{
+		fragment: auth.NewFragmentFilterPredicate(condition, false),
+	}})
+	dialect := goqu.Dialect("postgres")
+	dataset, err := buildGetDPPIDsByAssetAndMetadataSemanticIDsDataset(
+		&dialect,
+		[]string{"product-1"},
+		[]string{"urn:samm:io.admin-shell.idta.dpp_meta:1.0.0#DppMetadata"},
+		1,
+		"",
+	)
+	require.NoError(t, err)
+
+	dataset, err = (&AssetAdministrationShellDatabase{}).addDPPIDLookupAuthorization(
+		ctx,
+		dataset,
+		"AASREPO-GETDPPIDSBYASSETANDMETADATA",
+	)
+	require.NoError(t, err)
+	sqlQuery, sqlArgs, err := dataset.Prepared(true).ToSQL()
+	require.NoError(t, err)
+	return sqlQuery, sqlArgs
+}
+
+func TestSubmodelReferenceCheckSelectsPoolFromContext(t *testing.T) {
+	tests := []struct {
+		name        string
+		writerReads bool
+	}{
+		{name: "reader"},
+		{name: "writer", writerReads: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			writer, writerMock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer func() { _ = writer.Close() }()
+			reader, readerMock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer func() { _ = reader.Close() }()
+
+			backend, err := NewAssetAdministrationShellDatabaseFromPools(writer, reader, "off")
+			require.NoError(t, err)
+
+			selectedMock := readerMock
+			ctx := t.Context()
+			if test.writerReads {
+				selectedMock = writerMock
+				ctx = common.WithWriterPostgresReads(ctx)
+			}
+			selectedMock.ExpectBegin()
+			selectedMock.ExpectQuery("SELECT").WillReturnError(errors.New("lookup failed"))
+			selectedMock.ExpectRollback()
+
+			require.Error(t, backend.CheckIfSubmodelReferenceExistsInAssetAdministrationShell(ctx, "aas-1", "sm-1"))
+			require.NoError(t, writerMock.ExpectationsWereMet())
+			require.NoError(t, readerMock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestGetAssetAdministrationShellIDsByAssetAndSubmodelSemanticIDsUsesJoinedQuery(t *testing.T) {
+	t.Parallel()
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() {
+		_ = db.Close()
+	}()
+
+	sut := &AssetAdministrationShellDatabase{db: db}
+	queryPattern := regexp.QuoteMeta(
+		`SELECT DISTINCT "aas"."aas_id" FROM "aas" AS "aas" ` +
+			`INNER JOIN "asset_information" AS "asset_information" ON ("asset_information"."asset_information_id" = "aas"."id") ` +
+			`INNER JOIN "aas_submodel_reference" AS "submodel_reference" ON ("submodel_reference"."aas_id" = "aas"."id") ` +
+			`INNER JOIN "aas_submodel_reference_key" AS "submodel_reference_key" ON ("submodel_reference_key"."reference_id" = "submodel_reference"."id") ` +
+			`INNER JOIN "submodel" AS "submodel" ON ("submodel"."submodel_identifier" = "submodel_reference_key"."value") ` +
+			`INNER JOIN "submodel_semantic_id_reference_key" AS "semantic_id_key" ON ("semantic_id_key"."reference_id" = "submodel"."id") ` +
+			`WHERE ("asset_information"."global_asset_id" = ANY($1::text[]) AND "semantic_id_key"."value" = ANY($2::text[])) ` +
+			`ORDER BY "aas"."aas_id" ASC LIMIT $3`,
+	)
+	mock.ExpectQuery(queryPattern).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), 2).
+		WillReturnRows(sqlmock.NewRows([]string{"aas_id"}).
+			AddRow("dpp-1").
+			AddRow("dpp-2"))
+
+	identifiers, cursor, err := sut.GetAssetAdministrationShellIDsByAssetAndSubmodelSemanticIDs(
+		contextWithConfig(),
+		[]string{"product-1", "product-2"},
+		[]string{"https://admin-shell.io/idta/cds/dppMetadata/1"},
+		1,
+		"",
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"dpp-1"}, identifiers)
+	require.Equal(t, "dpp-1", cursor)
+	require.NoError(t, mock.ExpectationsWereMet())
+}

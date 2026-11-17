@@ -1,3 +1,28 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
 // Package descriptors contains the data‑access helpers that read and write
 // Asset Administration Shell (AAS) and Submodel descriptor data to a
 // PostgreSQL database.
@@ -14,23 +39,26 @@
 // Queries are built with goqu and executed via database/sql. Most read helpers
 // return plain model types from internal/common/model so callers can use the
 // results directly without further mapping.
+// Author: Martin Stemmer ( Fraunhofer IESE )
 package descriptors
 
 import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
+	"log/slog"
+	"time"
 
+	"github.com/FriedJannik/aas-go-sdk/stringification"
 	"github.com/doug-martin/goqu/v9"
 	"github.com/eclipse-basyx/basyx-go-components/internal/common"
-	"github.com/eclipse-basyx/basyx-go-components/internal/common/builder"
 	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
-	persistence_utils "github.com/eclipse-basyx/basyx-go-components/internal/submodelrepository/persistence/utils"
-	"golang.org/x/sync/errgroup"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model/grammar"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/pagination"
+	auth "github.com/eclipse-basyx/basyx-go-components/internal/common/security"
 )
 
-// InsertAdministrationShellDescriptor creates a new AssetAdministrationShellDescriptor
+// InsertAssetAdministrationShellDescriptor creates a new AssetAdministrationShellDescriptor
 // and all its related entities (display name, description, administration,
 // endpoints, specific asset IDs, extensions and submodel descriptors).
 //
@@ -44,10 +72,108 @@ import (
 //
 // Returns an error when SQL building/execution fails or when writing any of the
 // dependent rows fails. Errors are wrapped into common errors where relevant.
-func InsertAdministrationShellDescriptor(ctx context.Context, db *sql.DB, aasd model.AssetAdministrationShellDescriptor) error {
-	return WithTx(ctx, db, func(tx *sql.Tx) error {
-		return InsertAdministrationShellDescriptorTx(ctx, tx, aasd)
-	})
+func InsertAssetAdministrationShellDescriptor(ctx context.Context, db *sql.DB, aasd model.AssetAdministrationShellDescriptor) (model.AssetAdministrationShellDescriptor, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.AssetAdministrationShellDescriptor{}, common.NewInternalServerError("Failed to start postgres transaction. See console for information.")
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if err = InsertAdministrationShellDescriptorTx(ctx, tx, aasd); err != nil {
+		_ = tx.Rollback()
+		return model.AssetAdministrationShellDescriptor{}, err
+	}
+	if CanSkipPostInsertReadback(ctx) {
+		return aasd, common.CommitTransaction(tx)
+	}
+	result, err := GetAssetAdministrationShellDescriptorByIDTx(ctx, tx, aasd.Id)
+	if err != nil {
+		_ = tx.Rollback()
+		return model.AssetAdministrationShellDescriptor{}, err
+	}
+	return result, common.CommitTransaction(tx)
+}
+
+// CanSkipCreateReadback reports whether create readback can be skipped.
+//
+// Route-level authorization has already run, so readback is only required when
+// the request context contains ABAC filters or restricted create formulas.
+//
+// Parameters:
+//   - ctx: Request context carrying the ABAC query filter.
+//
+// Returns:
+//   - bool: True when callers can trust the created descriptor without readback.
+func CanSkipCreateReadback(ctx context.Context) bool {
+	queryFilter := auth.GetQueryFilter(ctx)
+	if queryFilter == nil {
+		return true
+	}
+	if len(queryFilter.Filters) > 0 {
+		return false
+	}
+	if len(queryFilter.FormulasByRight) > 0 {
+		return auth.HasUnrestrictedFormulaForRight(ctx, grammar.RightsEnumCREATE)
+	}
+	if queryFilter.Formula == nil {
+		return true
+	}
+	return auth.HasUnrestrictedFormulaForRight(ctx, grammar.RightsEnumCREATE)
+}
+
+// CanSkipPostInsertReadback reports whether post-insert readback can be skipped.
+//
+// This helper keeps the AAS descriptor-specific name for callers that return
+// newly inserted descriptors.
+//
+// Parameters:
+//   - ctx: Request context carrying the ABAC query filter.
+//
+// Returns:
+//   - bool: True when post-insert readback can be skipped.
+func CanSkipPostInsertReadback(ctx context.Context) bool {
+	return CanSkipCreateReadback(ctx)
+}
+
+// CanSkipDeleteReadback reports whether deletion needs no descriptor read for
+// authorization. History callers must check mutation recording separately.
+func CanSkipDeleteReadback(ctx context.Context) bool {
+	queryFilter := auth.GetQueryFilter(ctx)
+	if queryFilter == nil {
+		return true
+	}
+	if len(queryFilter.Filters) > 0 {
+		return false
+	}
+	if len(queryFilter.FormulasByRight) > 0 {
+		return auth.HasUnrestrictedFormulaForRight(ctx, grammar.RightsEnumDELETE)
+	}
+	if queryFilter.Formula == nil {
+		return true
+	}
+	return auth.HasUnrestrictedFormulaForRight(ctx, grammar.RightsEnumDELETE)
+}
+
+// CanSkipUpdateReadback reports whether the request context has no restrictive
+// update formula or fragment filter that requires post-update authorization.
+func CanSkipUpdateReadback(ctx context.Context) bool {
+	queryFilter := auth.GetQueryFilter(ctx)
+	if queryFilter == nil {
+		return true
+	}
+	if len(queryFilter.Filters) > 0 {
+		return false
+	}
+	if len(queryFilter.FormulasByRight) > 0 {
+		return auth.HasUnrestrictedFormulaForRight(ctx, grammar.RightsEnumUPDATE)
+	}
+	if queryFilter.Formula == nil {
+		return true
+	}
+	return auth.HasUnrestrictedFormulaForRight(ctx, grammar.RightsEnumUPDATE)
 }
 
 // InsertAdministrationShellDescriptorTx performs the same insert as
@@ -58,14 +184,19 @@ func InsertAdministrationShellDescriptor(ctx context.Context, db *sql.DB, aasd m
 // entities (display name/description/admin info/endpoints/specific IDs/extensions
 // and submodel descriptors). If any step fails, the error is returned and the
 // caller is responsible for rolling back the transaction.
-func InsertAdministrationShellDescriptorTx(_ context.Context, tx *sql.Tx, aasd model.AssetAdministrationShellDescriptor) error {
-	d := goqu.Dialect(dialect)
+func InsertAdministrationShellDescriptorTx(ctx context.Context, tx *sql.Tx, aasd model.AssetAdministrationShellDescriptor) error {
+	return insertAdministrationShellDescriptorTx(ctx, tx, aasd)
+}
 
-	descTbl := goqu.T(tblDescriptor)
+func insertAdministrationShellDescriptorTx(ctx context.Context, tx *sql.Tx, aasd model.AssetAdministrationShellDescriptor) error {
+	aasd = fillAASDescriptorCreator(aasd, auth.ReBACCreatorReference(ctx))
+	d := goqu.Dialect(common.Dialect)
+
+	descTbl := goqu.T(common.TblDescriptor)
 
 	sqlStr, args, buildErr := d.
-		Insert(tblDescriptor).
-		Returning(descTbl.Col(colID)).
+		Insert(common.TblDescriptor).
+		Returning(descTbl.Col(common.ColID)).
 		ToSQL()
 	if buildErr != nil {
 		return buildErr
@@ -74,42 +205,43 @@ func InsertAdministrationShellDescriptorTx(_ context.Context, tx *sql.Tx, aasd m
 	if err := tx.QueryRow(sqlStr, args...).Scan(&descriptorID); err != nil {
 		return err
 	}
+	if err := insertAdministrationShellDescriptorDetailsTx(ctx, tx, descriptorID, aasd, true); err != nil {
+		return err
+	}
+	if err := auth.RecordReBACResourceCreated(ctx, tx, auth.SemanticResourceAASDesc, aasd.Id); err != nil {
+		return err
+	}
+	return touchCreatedResourcesTx(ctx, tx, auth.SemanticResourceAASDesc, aasd.Id)
+}
 
-	var displayNameID, descriptionID, administrationID sql.NullInt64
+func insertAdministrationShellDescriptorDetailsTx(ctx context.Context, tx *sql.Tx, descriptorID int64, aasd model.AssetAdministrationShellDescriptor, insertAASDescriptor bool) error {
+	d := goqu.Dialect(common.Dialect)
 
-	dnID, err := persistence_utils.CreateLangStringNameTypes(tx, aasd.DisplayName)
+	descriptionPayload, err := buildLangStringTextPayload(aasd.Description)
 	if err != nil {
-		return common.NewInternalServerError("Failed to create DisplayName - no changes applied - see console for details")
+		return common.NewInternalServerError("AASDESC-INSERT-DESCRIPTIONPAYLOAD")
 	}
-	displayNameID = dnID
-	var convertedDescription []model.LangStringText
-	for _, desc := range aasd.Description {
-		convertedDescription = append(convertedDescription, desc)
-	}
-	descID, err := persistence_utils.CreateLangStringTextTypes(tx, convertedDescription)
+	displayNamePayload, err := buildLangStringNamePayload(aasd.DisplayName)
 	if err != nil {
-		return common.NewInternalServerError("Failed to create Description - no changes applied - see console for details")
+		return common.NewInternalServerError("AASDESC-INSERT-DISPLAYNAMEPAYLOAD")
 	}
-	descriptionID = descID
-
-	adminID, err := persistence_utils.CreateAdministrativeInformation(tx, aasd.Administration)
+	administrationPayload, err := buildAdministrativeInfoPayload(aasd.Administration)
 	if err != nil {
-		return common.NewInternalServerError("Failed to create Administration - no changes applied - see console for details")
+		return common.NewInternalServerError("AASDESC-INSERT-ADMINPAYLOAD")
 	}
-	administrationID = adminID
+	extensionsPayload, err := buildExtensionsPayload(aasd.Extensions)
+	if err != nil {
+		return common.NewInternalServerError("AASDESC-INSERT-EXTENSIONPAYLOAD")
+	}
 
-	sqlStr, args, buildErr = d.
-		Insert(tblAASDescriptor).
+	sqlStr, args, buildErr := d.
+		Insert(common.TblDescriptorPayload).
 		Rows(goqu.Record{
-			colDescriptorID:  descriptorID,
-			colDescriptionID: descriptionID,
-			colDisplayNameID: displayNameID,
-			colAdminInfoID:   administrationID,
-			colAssetKind:     aasd.AssetKind,
-			colAssetType:     aasd.AssetType,
-			colGlobalAssetID: aasd.GlobalAssetId,
-			colIDShort:       aasd.IdShort,
-			colAASID:         aasd.Id,
+			common.ColDescriptorID:              descriptorID,
+			common.ColDescriptionPayload:        goqu.L("?::jsonb", string(descriptionPayload)),
+			common.ColDisplayNamePayload:        goqu.L("?::jsonb", string(displayNamePayload)),
+			common.ColAdministrativeInfoPayload: goqu.L("?::jsonb", string(administrationPayload)),
+			common.ColExtensionsPayload:         goqu.L("?::jsonb", string(extensionsPayload)),
 		}).
 		ToSQL()
 	if buildErr != nil {
@@ -119,23 +251,136 @@ func InsertAdministrationShellDescriptorTx(_ context.Context, tx *sql.Tx, aasd m
 		return err
 	}
 
-	if err = createEndpoints(tx, descriptorID, aasd.Endpoints); err != nil {
-		return common.NewInternalServerError("Failed to create Endpoints - no changes applied - see console for details")
+	if insertAASDescriptor {
+		sqlStr, args, buildErr = d.
+			Insert(common.TblAASDescriptor).
+			Rows(buildAASDescriptorInsertRecord(ctx, descriptorID, aasd)).
+			ToSQL()
+		if buildErr != nil {
+			return buildErr
+		}
+		if _, err = tx.Exec(sqlStr, args...); err != nil {
+			return err
+		}
 	}
 
-	if err = createSpecificAssetID(tx, descriptorID, aasd.SpecificAssetIds); err != nil {
-		return common.NewInternalServerError("Failed to create Specific Asset Ids - no changes applied - see console for details")
-	}
-
-	if err = createExtensions(tx, descriptorID, aasd.Extensions); err != nil {
+	if err = CreateEndpoints(tx, descriptorID, aasd.Endpoints); err != nil {
 		return err
 	}
 
-	if err = createSubModelDescriptors(tx, descriptorID, aasd.SubmodelDescriptors); err != nil {
+	var aasRef sql.NullInt64
+	if cfg, ok := common.ConfigFromContext(ctx); ok && cfg.General.DiscoveryIntegration {
+		ref, err := ensureIntegratedDiscoveryEntryTx(ctx, tx, aasd.Id)
+		if err != nil {
+			return err
+		}
+		aasRef = sql.NullInt64{Int64: ref, Valid: true}
+	}
+
+	specificAssetIds := specificAssetIDsWithGlobalAssetID(ctx, aasd)
+
+	if err = common.CreateSpecificAssetIDDescriptor(tx, descriptorID, aasRef, specificAssetIds); err != nil {
 		return err
 	}
 
+	return createSubModelDescriptors(tx, sql.NullInt64{Int64: descriptorID, Valid: true}, aasd.SubmodelDescriptors)
+}
+
+func lockAASDescriptorUpsertTx(ctx context.Context, tx *sql.Tx, aasID string) error {
+	sqlStr, args, err := buildAASDescriptorUpsertLockSQL(aasID)
+	if err != nil {
+		return common.NewInternalServerError("AASDESC-LOCKAASUPSERT-BUILDSQL " + err.Error())
+	}
+
+	if _, err = tx.ExecContext(ctx, sqlStr, args...); err != nil {
+		return common.NewInternalServerError("AASDESC-LOCKAASUPSERT-EXECSQL " + err.Error())
+	}
 	return nil
+}
+
+func buildAASDescriptorUpsertLockSQL(aasID string) (string, []any, error) {
+	return goqu.
+		Dialect(common.Dialect).
+		Select(goqu.Func("pg_advisory_xact_lock", goqu.Func("hashtextextended", "aas_descriptor:"+aasID, int64(0)))).
+		Prepared(true).
+		ToSQL()
+}
+
+func selectAASDescriptorIDForUpdateTx(ctx context.Context, tx *sql.Tx, aasID string) (int64, bool, error) {
+	d := goqu.Dialect(common.Dialect)
+	aasTbl := goqu.T(common.TblAASDescriptor)
+
+	sqlStr, args, buildErr := d.
+		From(aasTbl).
+		Select(aasTbl.Col(common.ColDescriptorID)).
+		Where(aasTbl.Col(common.ColAASID).Eq(aasID)).
+		ForUpdate(goqu.Wait).
+		ToSQL()
+	if buildErr != nil {
+		return 0, false, buildErr
+	}
+
+	var descriptorID int64
+	if err := tx.QueryRowContext(ctx, sqlStr, args...).Scan(&descriptorID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+
+	return descriptorID, true, nil
+}
+
+func updateAASDescriptorRowTx(ctx context.Context, tx *sql.Tx, descriptorID int64, aasd model.AssetAdministrationShellDescriptor) error {
+	d := goqu.Dialect(common.Dialect)
+	record := buildAASDescriptorUpdateRecord(ctx, descriptorID, aasd)
+
+	sqlStr, args, buildErr := d.
+		Update(common.TblAASDescriptor).
+		Set(record).
+		Where(goqu.C(common.ColDescriptorID).Eq(descriptorID)).
+		ToSQL()
+	if buildErr != nil {
+		return buildErr
+	}
+
+	_, err := tx.ExecContext(ctx, sqlStr, args...)
+	return err
+}
+
+// buildAASDescriptorInsertRecord accepts either a concrete descriptor id or a
+// Goqu sequence expression, because batch inserts reference ids before they are
+// scanned back as int64 values.
+func buildAASDescriptorInsertRecord(
+	ctx context.Context,
+	descriptorID any,
+	aasd model.AssetAdministrationShellDescriptor,
+) goqu.Record {
+	record := goqu.Record{
+		common.ColDescriptorID:  descriptorID,
+		common.ColAssetKind:     aasd.AssetKind,
+		common.ColAssetType:     aasd.AssetType,
+		common.ColGlobalAssetID: aasd.GlobalAssetId,
+		common.ColIDShort:       aasd.IdShort,
+		common.ColAASID:         aasd.Id,
+	}
+
+	if allowAASDescriptorCreatedAtOverrideFromContext(ctx) && aasd.CreatedAt != nil {
+		record[common.ColCreatedAt] = *aasd.CreatedAt
+	}
+
+	return record
+}
+
+func buildAASDescriptorUpdateRecord(
+	ctx context.Context,
+	descriptorID any,
+	aasd model.AssetAdministrationShellDescriptor,
+) goqu.Record {
+	record := buildAASDescriptorInsertRecord(ctx, descriptorID, aasd)
+	delete(record, common.ColDescriptorID)
+	delete(record, common.ColCreatedAt)
+	return record
 }
 
 // GetAssetAdministrationShellDescriptorByID returns a fully materialized
@@ -148,123 +393,30 @@ func InsertAdministrationShellDescriptorTx(_ context.Context, tx *sql.Tx, aasd m
 func GetAssetAdministrationShellDescriptorByID(
 	ctx context.Context, db *sql.DB, aasIdentifier string,
 ) (model.AssetAdministrationShellDescriptor, error) {
-	d := goqu.Dialect(dialect)
-
-	aas := goqu.T(tblAASDescriptor).As("aas")
-
-	sqlStr, args, buildErr := d.
-		From(aas).
-		Select(
-			aas.Col(colDescriptorID),
-			aas.Col(colAssetKind),
-			aas.Col(colAssetType),
-			aas.Col(colGlobalAssetID),
-			aas.Col(colIDShort),
-			aas.Col(colAASID),
-			aas.Col(colAdminInfoID),
-			aas.Col(colDisplayNameID),
-			aas.Col(colDescriptionID),
-		).
-		Where(aas.Col(colAASID).Eq(aasIdentifier)).
-		Limit(1).
-		ToSQL()
-	if buildErr != nil {
-		return model.AssetAdministrationShellDescriptor{}, buildErr
-	}
-
-	var (
-		descID                            int64
-		assetKindStr                      sql.NullString
-		assetType, globalAssetID, idShort sql.NullString
-		idStr                             string
-		adminInfoID                       sql.NullInt64
-		displayNameID                     sql.NullInt64
-		descriptionID                     sql.NullInt64
-	)
-
-	if err := db.QueryRowContext(ctx, sqlStr, args...).Scan(
-		&descID,
-		&assetKindStr,
-		&assetType,
-		&globalAssetID,
-		&idShort,
-		&idStr,
-		&adminInfoID,
-		&displayNameID,
-		&descriptionID,
-	); err != nil {
-		if err == sql.ErrNoRows {
-			return model.AssetAdministrationShellDescriptor{}, common.NewErrNotFound("AAS Descriptor not found")
-		}
+	result, _, err := listAssetAdministrationShellDescriptorsSingleStatement(ctx, db, 1, "", "", "", aasIdentifier, time.Time{}, time.Time{})
+	if err != nil {
 		return model.AssetAdministrationShellDescriptor{}, err
 	}
-
-	var ak *model.AssetKind
-	if assetKindStr.Valid && assetKindStr.String != "" {
-		v, err := model.NewAssetKindFromValue(assetKindStr.String)
-		if err != nil {
-			return model.AssetAdministrationShellDescriptor{}, fmt.Errorf("invalid AssetKind %q", assetKindStr.String)
-		}
-		ak = &v
+	if len(result) != 1 {
+		return model.AssetAdministrationShellDescriptor{}, common.NewErrNotFound("AAS Descriptor not found")
 	}
-	g, ctx := errgroup.WithContext(ctx)
+	return result[0], nil
+}
 
-	var (
-		adminInfo        *model.AdministrativeInformation
-		displayName      []model.LangStringNameType
-		description      []model.LangStringTextType
-		endpoints        []model.Endpoint
-		specificAssetIDs []model.SpecificAssetID
-		extensions       []model.Extension
-		smds             []model.SubmodelDescriptor
-	)
-
-	g.Go(func() error {
-		if adminInfoID.Valid {
-			ai, err := ReadAdministrativeInformationByID(ctx, db, tblAASDescriptor, adminInfoID)
-			if err != nil {
-				return err
-			}
-			adminInfo = ai
-		}
-		return nil
-	})
-	GoAssign(g, func() ([]model.LangStringNameType, error) {
-		return persistence_utils.GetLangStringNameTypes(db, displayNameID)
-	}, &displayName)
-
-	GoAssign(g, func() ([]model.LangStringTextType, error) {
-		return persistence_utils.GetLangStringTextTypes(db, descriptionID)
-	}, &description)
-
-	GoAssign(g, func() ([]model.Endpoint, error) { return ReadEndpointsByDescriptorID(ctx, db, descID) }, &endpoints)
-
-	GoAssign(g, func() ([]model.SpecificAssetID, error) { return ReadSpecificAssetIDsByDescriptorID(ctx, db, descID) }, &specificAssetIDs)
-
-	GoAssign(g, func() ([]model.Extension, error) { return ReadExtensionsByDescriptorID(ctx, db, descID) }, &extensions)
-
-	GoAssign(g, func() ([]model.SubmodelDescriptor, error) {
-		return ReadSubmodelDescriptorsByAASDescriptorID(ctx, db, descID)
-	}, &smds)
-
-	if err := g.Wait(); err != nil {
+// GetAssetAdministrationShellDescriptorByIDTx returns a fully materialized
+// AssetAdministrationShellDescriptor by its AAS Id string using the provided
+// transaction. It avoids concurrent queries, which are unsafe on *sql.Tx.
+func GetAssetAdministrationShellDescriptorByIDTx(
+	ctx context.Context, tx *sql.Tx, aasIdentifier string,
+) (model.AssetAdministrationShellDescriptor, error) {
+	result, _, err := listAssetAdministrationShellDescriptorsSingleStatement(ctx, tx, 1, "", "", "", aasIdentifier, time.Time{}, time.Time{})
+	if err != nil {
 		return model.AssetAdministrationShellDescriptor{}, err
 	}
-
-	return model.AssetAdministrationShellDescriptor{
-		AssetKind:           ak,
-		AssetType:           assetType.String,
-		GlobalAssetId:       globalAssetID.String,
-		IdShort:             idShort.String,
-		Id:                  idStr,
-		Administration:      adminInfo,
-		DisplayName:         displayName,
-		Description:         description,
-		Endpoints:           endpoints,
-		SpecificAssetIds:    specificAssetIDs,
-		Extensions:          extensions,
-		SubmodelDescriptors: smds,
-	}, nil
+	if len(result) != 1 {
+		return model.AssetAdministrationShellDescriptor{}, common.NewErrNotFound("AAS Descriptor not found")
+	}
+	return result[0], nil
 }
 
 // DeleteAssetAdministrationShellDescriptorByID deletes the descriptor for the
@@ -273,22 +425,102 @@ func GetAssetAdministrationShellDescriptorByID(
 //
 // The delete runs in its own transaction.
 func DeleteAssetAdministrationShellDescriptorByID(ctx context.Context, db *sql.DB, aasIdentifier string) error {
-	return WithTx(ctx, db, func(tx *sql.Tx) error {
-		return deleteAssetAdministrationShellDescriptorByIDTx(ctx, tx, aasIdentifier)
-	})
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return common.NewInternalServerError("Failed to start postgres transaction. See console for information.")
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	_, err = GetAssetAdministrationShellDescriptorByIDTx(ctx, tx, aasIdentifier)
+	if err != nil {
+		return err
+	}
+
+	err = deleteAssetAdministrationShellDescriptorByIDTx(ctx, tx, aasIdentifier)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+
+	return common.CommitTransaction(tx)
+}
+
+// DeleteAssetAdministrationShellDescriptorByIDTx deletes a descriptor by AAS id
+// using the provided transaction.
+func DeleteAssetAdministrationShellDescriptorByIDTx(ctx context.Context, tx *sql.Tx, aasIdentifier string) error {
+	return deleteAssetAdministrationShellDescriptorByIDTx(ctx, tx, aasIdentifier)
+}
+
+// DeleteAssetAdministrationShellDescriptorsByIDsTx deletes AAS descriptors by id.
+//
+// The function deletes AAS descriptor base rows and embedded submodel descriptor
+// rows in bounded chunks.
+//
+// Parameters:
+//   - ctx: Request context carrying configuration data.
+//   - tx: Transaction used for deletion.
+//   - aasIdentifiers: AAS descriptor identifiers to delete.
+//
+// Returns:
+//   - error: Error when SQL rendering or deletion fails.
+func DeleteAssetAdministrationShellDescriptorsByIDsTx(ctx context.Context, tx *sql.Tx, aasIdentifiers []string) error {
+	if len(aasIdentifiers) == 0 {
+		return nil
+	}
+	for _, identifier := range aasIdentifiers {
+		if err := auth.RecordReBACResourceDeleted(ctx, tx, auth.SemanticResourceAASDesc, identifier); err != nil {
+			return err
+		}
+	}
+	d := goqu.Dialect(common.Dialect)
+	batch := &common.PostgreSQLBatch{}
+	limit := common.BulkBatchLimitFromContext(ctx)
+	for start := 0; start < len(aasIdentifiers); start += limit {
+		end := min(start+limit, len(aasIdentifiers))
+		descriptorIDs := d.
+			From(common.TblAASDescriptor).
+			Select(common.ColDescriptorID).
+			Where(goqu.C(common.ColAASID).In(aasIdentifiers[start:end]))
+		childDescriptorIDs := d.
+			From(common.TblSubmodelDescriptor).
+			Select(common.ColDescriptorID).
+			Where(goqu.C(common.ColAASDescriptorID).In(descriptorIDs))
+		if err := batch.AppendDataset(
+			d.Delete(common.TblDescriptor).Where(goqu.C(common.ColID).In(childDescriptorIDs)),
+		); err != nil {
+			return common.NewInternalServerError("AASDESC-BULKDELETE-BUILDCHILDSQL " + err.Error())
+		}
+		if err := batch.AppendDataset(
+			d.Delete(common.TblDescriptor).Where(goqu.C(common.ColID).In(descriptorIDs)),
+		); err != nil {
+			return common.NewInternalServerError("AASDESC-BULKDELETE-BUILDPARENTSQL " + err.Error())
+		}
+	}
+	if err := recordAdministrationShellDescriptorsDeletedTx(ctx, tx, batch, aasIdentifiers...); err != nil {
+		return err
+	}
+	return common.ExecutePostgreSQLBatchInTransaction(ctx, tx, batch.Statements())
 }
 
 // DeleteAssetAdministrationShellDescriptorByIDTx deletes using the provided
 // transaction. It resolves the internal descriptor id and removes the base
-// descriptor row. Dependent rows are removed via ON DELETE CASCADE.
+// descriptor row plus descriptor rows of linked submodel descriptors.
+// Dependent rows are removed via ON DELETE CASCADE.
 func deleteAssetAdministrationShellDescriptorByIDTx(ctx context.Context, tx *sql.Tx, aasIdentifier string) error {
-	d := goqu.Dialect(dialect)
-	aas := goqu.T(tblAASDescriptor).As("aas")
+	if err := auth.RecordReBACResourceDeleted(ctx, tx, auth.SemanticResourceAASDesc, aasIdentifier); err != nil {
+		return err
+	}
+	d := goqu.Dialect(common.Dialect)
+	aas := goqu.T(common.TblAASDescriptor).As("aas")
 
 	sqlStr, args, buildErr := d.
 		From(aas).
-		Select(aas.Col(colDescriptorID)).
-		Where(aas.Col(colAASID).Eq(aasIdentifier)).
+		Select(aas.Col(common.ColDescriptorID)).
+		Where(aas.Col(common.ColAASID).Eq(aasIdentifier)).
 		Limit(1).
 		ToSQL()
 	if buildErr != nil {
@@ -302,62 +534,92 @@ func deleteAssetAdministrationShellDescriptorByIDTx(ctx context.Context, tx *sql
 		}
 		return scanErr
 	}
+	childDescriptorIDs := d.
+		From(common.TblSubmodelDescriptor).
+		Select(common.ColDescriptorID).
+		Where(goqu.C(common.ColAASDescriptorID).Eq(descID))
 
-	delStr, delArgs, buildDelErr := d.
-		Delete(tblDescriptor).
-		Where(goqu.C(colID).Eq(descID)).
-		ToSQL()
-	if buildDelErr != nil {
-		return buildDelErr
+	batch := &common.PostgreSQLBatch{}
+	if err := batch.AppendDataset(d.Delete(common.TblDescriptor).Where(goqu.C(common.ColID).In(childDescriptorIDs))); err != nil {
+		return common.NewInternalServerError("AASDESC-DELETE-BUILDCHILDSQL " + err.Error())
 	}
-	if _, execErr := tx.Exec(delStr, delArgs...); execErr != nil {
-		return execErr
+	if err := batch.AppendDataset(d.Delete(common.TblDescriptor).Where(goqu.C(common.ColID).Eq(descID))); err != nil {
+		return common.NewInternalServerError("AASDESC-DELETE-BUILDPARENTSQL " + err.Error())
 	}
-	return nil
+	if err := recordAdministrationShellDescriptorsDeletedTx(ctx, tx, batch, aasIdentifier); err != nil {
+		return err
+	}
+	return common.ExecutePostgreSQLBatchInTransaction(ctx, tx, batch.Statements())
 }
 
-// ReplaceAdministrationShellDescriptor atomically replaces the descriptor with
-// the same AAS Id: if a descriptor exists it is deleted (base descriptor row),
-// then the provided descriptor is inserted. Related rows are recreated from the
-// input. The returned boolean indicates whether a descriptor existed before the
-// replace.
-func ReplaceAdministrationShellDescriptor(ctx context.Context, db *sql.DB, aasd model.AssetAdministrationShellDescriptor) (bool, error) {
-	existed := false
-	err := WithTx(ctx, db, func(tx *sql.Tx) error {
-		d := goqu.Dialect(dialect)
-		aas := goqu.T(tblAASDescriptor).As("aas")
+func buildListAASDescriptorPageQuery(
+	ctx context.Context,
+	peekLimit int32,
+	cursor string,
+	assetKind model.AssetKind,
+	assetType string,
+	identifiable string,
+	createdFrom time.Time,
+	updatedFrom time.Time,
+	collector *grammar.ResolvedFieldPathCollector,
+) (*goqu.SelectDataset, error) {
+	if peekLimit < 0 {
+		return nil, common.NewErrBadRequest("Limit must not be negative")
+	}
 
-		sqlStr, args, buildErr := d.
-			From(aas).
-			Select(aas.Col(colDescriptorID)).
-			Where(aas.Col(colAASID).Eq(aasd.Id)).
-			Limit(1).
-			ToSQL()
-		if buildErr != nil {
-			return buildErr
-		}
-		var descID int64
-		scanErr := tx.QueryRowContext(ctx, sqlStr, args...).Scan(&descID)
-		if scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
-			return scanErr
-		}
-		if scanErr == nil {
-			existed = true
-			delStr, delArgs, buildDelErr := d.
-				Delete(tblDescriptor).
-				Where(goqu.C(colID).Eq(descID)).
-				ToSQL()
-			if buildDelErr != nil {
-				return buildDelErr
-			}
-			if _, execErr := tx.Exec(delStr, delArgs...); execErr != nil {
-				return execErr
-			}
-		}
+	d := goqu.Dialect(common.Dialect)
+	ds := d.From(common.TDescriptor).
+		InnerJoin(
+			common.TAASDescriptor,
+			goqu.On(common.TAASDescriptor.Col(common.ColDescriptorID).Eq(common.TDescriptor.Col(common.ColID))),
+		).
+		Select(
+			common.TDescriptor.Col(common.ColID).As("descriptor_id"),
+			common.TAASDescriptor.Col(common.ColAASID).As("sort_aas_id"),
+		)
 
-		return InsertAdministrationShellDescriptorTx(ctx, tx, aasd)
-	})
-	return existed, err
+	ds, err := auth.AddFormulaQueryFromContext(ctx, ds, collector)
+	if err != nil {
+		return nil, err
+	}
+
+	if cursor != "" {
+		ds = ds.Where(common.TAASDescriptor.Col(common.ColAASID).Gte(cursor))
+	}
+
+	if assetType != "" {
+		ds = ds.Where(common.TAASDescriptor.Col(common.ColAssetType).Eq(assetType))
+	}
+
+	if assetKind != "" {
+		assetKindAsString := model.GetAssetKindString(assetKind)
+		convertedAssetKind, ok := stringification.AssetKindFromString(assetKindAsString)
+		if !ok {
+			return nil, errors.New("Invalid asset kind: " + assetKindAsString)
+		}
+		ds = ds.Where(common.TAASDescriptor.Col(common.ColAssetKind).Eq(convertedAssetKind))
+	}
+
+	if identifiable != "" {
+		ds = ds.Where(common.TAASDescriptor.Col(common.ColID).Eq(identifiable))
+	}
+	switch {
+	case !createdFrom.IsZero() && !updatedFrom.IsZero():
+		ds = ds.Where(goqu.Or(
+			common.TAASDescriptor.Col("administration_created_at").Gte(createdFrom.UTC()),
+			common.TAASDescriptor.Col("administration_updated_at").Gte(updatedFrom.UTC()),
+		))
+	case !createdFrom.IsZero():
+		ds = ds.Where(common.TAASDescriptor.Col("administration_created_at").Gte(createdFrom.UTC()))
+	case !updatedFrom.IsZero():
+		ds = ds.Where(common.TAASDescriptor.Col("administration_updated_at").Gte(updatedFrom.UTC()))
+	}
+
+	ds = ds.
+		Order(common.TAASDescriptor.Col(common.ColAASID).Asc()).
+		Limit(uint(peekLimit))
+
+	return ds, nil
 }
 
 // ListAssetAdministrationShellDescriptors lists AAS descriptors with optional
@@ -367,245 +629,129 @@ func ReplaceAdministrationShellDescriptor(ctx context.Context, db *sql.DB, aasd 
 //
 // It returns the page of fully assembled descriptors and, when more results are
 // available, a next cursor value (the Id immediately after the page). When
-// limit <= 0, a conservative large default is applied.
+// limit <= 0, a default page size of 100 is applied.
+//
+//nolint:revive // Its only 31 instead of 30 - 1 is okay
 func ListAssetAdministrationShellDescriptors(
 	ctx context.Context,
-	db *sql.DB,
+	db DBQueryer,
 	limit int32,
 	cursor string,
 	assetKind model.AssetKind,
 	assetType string,
+	identifiable string,
+	createdFrom time.Time,
+	updatedFrom time.Time,
 ) ([]model.AssetAdministrationShellDescriptor, string, error) {
-
-	if limit <= 0 {
-		limit = 1000000
+	if debugEnabled(ctx) {
+		defer func(start time.Time) {
+			slog.DebugContext(ctx, "AAS descriptor list completed", "duration", time.Since(start))
+		}(time.Now())
 	}
-	peekLimit := int(limit) + 1
-
-	d := goqu.Dialect(dialect)
-	aas := goqu.T(tblAASDescriptor).As("aas")
-
-	ds := d.
-		From(aas).
-		Select(
-			aas.Col(colDescriptorID),
-			aas.Col(colAssetKind),
-			aas.Col(colAssetType),
-			aas.Col(colGlobalAssetID),
-			aas.Col(colIDShort),
-			aas.Col(colAASID),
-			aas.Col(colAdminInfoID),
-			aas.Col(colDisplayNameID),
-			aas.Col(colDescriptionID),
+	if !hasAASDescriptorFilters(ctx) {
+		return listAssetAdministrationShellDescriptorsBatched(
+			ctx,
+			db,
+			limit,
+			cursor,
+			assetKind,
+			assetType,
+			identifiable,
+			createdFrom,
+			updatedFrom,
 		)
-	if cursor != "" {
-		ds = ds.Where(aas.Col(colAASID).Gte(cursor))
 	}
+	return listAssetAdministrationShellDescriptorsSingleStatement(
+		ctx,
+		db,
+		limit,
+		cursor,
+		assetKind,
+		assetType,
+		identifiable,
+		createdFrom,
+		updatedFrom,
+	)
+}
 
-	if assetType != "" {
-		ds = ds.Where(aas.Col(colAssetType).Eq(assetType))
+// ListAssetAdministrationShellDescriptorIdentifiers lists the AAS identifiers
+// of the descriptors visible under the ABAC formula from ctx. It uses the same
+// order and cursor semantics as ListAssetAdministrationShellDescriptors without
+// assembling the descriptors.
+func ListAssetAdministrationShellDescriptorIdentifiers(
+	ctx context.Context,
+	db DBQueryer,
+	limit int32,
+	cursor string,
+) ([]string, string, error) {
+	db = withDescriptorDebugQueryer(ctx, db)
+	if limit <= 0 {
+		limit = common.DefaultPageLimit(ctx)
 	}
-
-	if assetKind != "" {
-		ds = ds.Where(aas.Col(colAssetKind).Eq(assetKind))
+	peekLimit := limit
+	if peekLimit < 1<<31-1 {
+		peekLimit++
 	}
-
-	ds = ds.
-		Order(aas.Col(colAASID).Asc()).
-		Limit(uint(peekLimit))
-
-	sqlStr, args, buildErr := ds.ToSQL()
-	if buildErr != nil {
-		return nil, "", common.NewInternalServerError("Failed to build AAS descriptor query. See server logs for details.")
-	}
-
-	rows, err := db.QueryContext(ctx, sqlStr, args...)
+	collector, err := newAASDescriptorJSONCollector(common.TblAASDescriptor, common.ColDescriptorID, common.TblAASDescriptor)
 	if err != nil {
-		return nil, "", common.NewInternalServerError("Failed to query AAS descriptors. See server logs for details.")
-	}
-	defer func() {
-		_ = rows.Close()
-	}()
-
-	descRows := make([]builder.AssetAdministrationShellDescriptorRow, 0, peekLimit)
-	for rows.Next() {
-		var r builder.AssetAdministrationShellDescriptorRow
-		if err := rows.Scan(
-			&r.DescID,
-			&r.AssetKindStr,
-			&r.AssetType,
-			&r.GlobalAssetID,
-			&r.IDShort,
-			&r.IDStr,
-			&r.AdminInfoID,
-			&r.DisplayNameID,
-			&r.DescriptionID,
-		); err != nil {
-			return nil, "", common.NewInternalServerError("Failed to scan AAS descriptor row. See server logs for details.")
-		}
-		descRows = append(descRows, r)
-	}
-	if rows.Err() != nil {
-		return nil, "", common.NewInternalServerError("Failed to iterate AAS descriptors. See server logs for details.")
-	}
-
-	var nextCursor string
-	if len(descRows) > int(limit) {
-		nextCursor = descRows[limit].IDStr
-		descRows = descRows[:limit]
-	}
-
-	if len(descRows) == 0 {
-		return []model.AssetAdministrationShellDescriptor{}, nextCursor, nil
-	}
-
-	descIDs := make([]int64, 0, len(descRows))
-	adminInfoIDs := make([]int64, 0, len(descRows))
-	displayNameIDs := make([]int64, 0, len(descRows))
-	descriptionIDs := make([]int64, 0, len(descRows))
-
-	seenDesc := make(map[int64]struct{}, len(descRows))
-	seenAI := map[int64]struct{}{}
-	seenDN := map[int64]struct{}{}
-	seenDE := map[int64]struct{}{}
-
-	for _, r := range descRows {
-
-		if _, ok := seenDesc[r.DescID]; !ok {
-			seenDesc[r.DescID] = struct{}{}
-			descIDs = append(descIDs, r.DescID)
-		}
-
-		if r.AdminInfoID.Valid {
-			id := r.AdminInfoID.Int64
-			if _, ok := seenAI[id]; !ok {
-				seenAI[id] = struct{}{}
-				adminInfoIDs = append(adminInfoIDs, id)
-			}
-		}
-		if r.DisplayNameID.Valid {
-			id := r.DisplayNameID.Int64
-			if _, ok := seenDN[id]; !ok {
-				seenDN[id] = struct{}{}
-				displayNameIDs = append(displayNameIDs, id)
-			}
-		}
-
-		if r.DescriptionID.Valid {
-			id := r.DescriptionID.Int64
-			if _, ok := seenDE[id]; !ok {
-				seenDE[id] = struct{}{}
-				descriptionIDs = append(descriptionIDs, id)
-			}
-		}
-	}
-
-	admByID := map[int64]*model.AdministrativeInformation{}
-	dnByID := map[int64][]model.LangStringNameType{}
-	descByID := map[int64][]model.LangStringTextType{}
-	endpointsByDesc := map[int64][]model.Endpoint{}
-	specificByDesc := map[int64][]model.SpecificAssetID{}
-	extByDesc := map[int64][]model.Extension{}
-	smdByDesc := map[int64][]model.SubmodelDescriptor{}
-
-	g, gctx := errgroup.WithContext(ctx)
-
-	if len(adminInfoIDs) > 0 {
-		ids := append([]int64(nil), adminInfoIDs...)
-		GoAssign(g, func() (map[int64]*model.AdministrativeInformation, error) {
-			return ReadAdministrativeInformationByIDs(gctx, db, tblAASDescriptor, ids)
-		}, &admByID)
-	}
-	if len(displayNameIDs) > 0 {
-		ids := append([]int64(nil), displayNameIDs...)
-		GoAssign(g, func() (map[int64][]model.LangStringNameType, error) {
-			return GetLangStringNameTypesByIDs(db, ids)
-		}, &dnByID)
-	}
-
-	if len(descriptionIDs) > 0 {
-		ids := append([]int64(nil), descriptionIDs...)
-		GoAssign(g, func() (map[int64][]model.LangStringTextType, error) {
-			return GetLangStringTextTypesByIDs(db, ids)
-		}, &descByID)
-	}
-
-	if len(descIDs) > 0 {
-		ids := append([]int64(nil), descIDs...)
-		GoAssign(g, func() (map[int64][]model.Endpoint, error) {
-			return ReadEndpointsByDescriptorIDs(gctx, db, ids)
-		}, &endpointsByDesc)
-		GoAssign(g, func() (map[int64][]model.SpecificAssetID, error) {
-			return ReadSpecificAssetIDsByDescriptorIDs(gctx, db, ids)
-		}, &specificByDesc)
-		GoAssign(g, func() (map[int64][]model.Extension, error) {
-			return ReadExtensionsByDescriptorIDs(gctx, db, ids)
-		}, &extByDesc)
-		GoAssign(g, func() (map[int64][]model.SubmodelDescriptor, error) {
-			return ReadSubmodelDescriptorsByAASDescriptorIDs(gctx, db, ids)
-		}, &smdByDesc)
-	}
-
-	if err := g.Wait(); err != nil {
 		return nil, "", err
 	}
+	page, err := buildListAASDescriptorPageQuery(ctx, peekLimit, cursor, "", "", "", time.Time{}, time.Time{}, collector)
+	if err != nil {
+		return nil, "", err
+	}
+	page = requireAASDescriptorCursorExists(page, cursor)
+	sqlStr, args, err := page.Prepared(true).ToSQL()
+	if err != nil {
+		return nil, "", common.NewInternalServerError("AASREG-LISTAASIDS-BUILDQUERY " + err.Error())
+	}
+	rows, err := db.QueryContext(ctx, sqlStr, args...)
+	if err != nil {
+		return nil, "", common.NewInternalServerError("AASREG-LISTAASIDS-QUERYDB " + err.Error())
+	}
+	defer func() { _ = rows.Close() }()
 
-	out := make([]model.AssetAdministrationShellDescriptor, 0, len(descRows))
-	for _, r := range descRows {
-		var ak *model.AssetKind
-		if r.AssetKindStr.Valid && r.AssetKindStr.String != "" {
-			v, convErr := model.NewAssetKindFromValue(r.AssetKindStr.String)
-			if convErr != nil {
-				return nil, "", fmt.Errorf("invalid AssetKind %q for AAS %s", r.AssetKindStr.String, r.IDStr)
-			}
-			ak = &v
+	identifiers := make([]string, 0, pagination.BufferCapacity(int(peekLimit)))
+	for rows.Next() {
+		var descriptorID int64
+		var identifier string
+		if scanErr := rows.Scan(&descriptorID, &identifier); scanErr != nil {
+			return nil, "", common.NewInternalServerError("AASREG-LISTAASIDS-SCANROW " + scanErr.Error())
 		}
-
-		var adminInfo *model.AdministrativeInformation
-		if r.AdminInfoID.Valid {
-			if v, ok := admByID[r.AdminInfoID.Int64]; ok {
-				tmp := v
-				adminInfo = tmp
-			}
-		}
-
-		var displayName []model.LangStringNameType
-		if r.DisplayNameID.Valid {
-			displayName = dnByID[r.DisplayNameID.Int64]
-		}
-
-		var description []model.LangStringTextType
-		if r.DescriptionID.Valid {
-			description = descByID[r.DescriptionID.Int64]
-		}
-
-		out = append(out, model.AssetAdministrationShellDescriptor{
-			AssetKind:           ak,
-			AssetType:           r.AssetType.String,
-			GlobalAssetId:       r.GlobalAssetID.String,
-			IdShort:             r.IDShort.String,
-			Id:                  r.IDStr,
-			Administration:      adminInfo,
-			DisplayName:         displayName,
-			Description:         description,
-			Endpoints:           endpointsByDesc[r.DescID],
-			SpecificAssetIds:    specificByDesc[r.DescID],
-			Extensions:          extByDesc[r.DescID],
-			SubmodelDescriptors: smdByDesc[r.DescID],
-		})
+		identifiers = append(identifiers, identifier)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", common.NewInternalServerError("AASREG-LISTAASIDS-ITERATEROWS " + err.Error())
 	}
 
-	return out, nextCursor, nil
+	identifiers, nextCursor := applyCursorLimit(identifiers, limit, func(identifier string) string { return identifier })
+	return identifiers, nextCursor, nil
+}
+
+func requireAASDescriptorCursorExists(page *goqu.SelectDataset, cursor string) *goqu.SelectDataset {
+	if cursor == "" {
+		return page
+	}
+	cursorAAS := goqu.T(common.TblAASDescriptor).As("cursor_aas")
+	cursorExists := goqu.Dialect(common.Dialect).From(cursorAAS).
+		Select(goqu.L("1")).
+		Where(cursorAAS.Col(common.ColAASID).Eq(cursor)).
+		Limit(1)
+	return page.Where(goqu.Exists(cursorExists))
 }
 
 // ExistsAASByID performs a lightweight existence check for an AAS by its Id
 // string. It returns true when a descriptor exists, false when it does not.
 func ExistsAASByID(ctx context.Context, db *sql.DB, aasID string) (bool, error) {
-	d := goqu.Dialect(dialect)
-	aas := goqu.T(tblAASDescriptor).As("aas")
+	return existsAASByID(ctx, db, aasID)
+}
 
-	ds := d.From(aas).Select(goqu.L("1")).Where(aas.Col(colAASID).Eq(aasID)).Limit(1)
-	sqlStr, args, err := ds.ToSQL()
+func existsAASByID(ctx context.Context, db DBQueryer, aasID string) (bool, error) {
+	d := goqu.Dialect(common.Dialect)
+	aas := goqu.T(common.TblAASDescriptor).As("aas")
+
+	ds := d.From(aas).Select(goqu.L("1")).Where(aas.Col(common.ColAASID).Eq(aasID)).Limit(1)
+	sqlStr, args, err := ds.Prepared(true).ToSQL()
 	if err != nil {
 		return false, err
 	}

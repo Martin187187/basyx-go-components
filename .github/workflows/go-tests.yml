@@ -7,6 +7,10 @@ on:
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/go-tests.yml'
+      - '**.sql'
+      - 'internal/**/*.json'
+      - 'cmd/aasxfileserverservice/openapi.yaml'
+      - 'examples/BaSyxMCPExample/secured/keycloak/**'
   push:
     branches: [main]
     paths:
@@ -14,71 +18,927 @@ on:
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/go-tests.yml'
+      - '**.sql'
+      - 'internal/**/*.json'
+      - 'cmd/aasxfileserverservice/openapi.yaml'
+      - 'examples/BaSyxMCPExample/secured/keycloak/**'
+
+permissions:
+  contents: read
 
 jobs:
-  # unit-tests:
-  #   name: Run Unit Tests
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Check out code
-  #       uses: actions/checkout@v5
-  #     - name: Set up Go
-  #       uses: actions/setup-go@v6
-  #       with:
-  #         go-version: '1.25'
-  #     - name: Get dependencies
-  #       run: go mod download
-  #     - name: Run unit tests
-  #       run: go test ./... -v -tags=unit
-
-  integration-tests:
-    name: Run Integration Tests
+  discovery-service-security-tests:
+    name: Discovery Service Security Tests
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          # Use the version in go.mod if present; otherwise pin a version
           go-version-file: go.mod
           cache: true
 
       - name: Get dependencies
         run: go mod download
-      # - name: Setup Docker Compose
-      #   run: |
-      #     cd internal/submodelrepository/integration_tests
-      #     docker compose -f docker_compose/docker_compose.yml up -d --build
-      #     echo "Waiting for services to be ready..."
-      #     sleep 30
 
       - name: Run discovery service security tests
         run: |
           cd internal/discoveryservice/security_tests
           go test -v
 
-      - name: Run integration tests
+  submodel-repository-integration-tests:
+    name: Submodel Repository Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run submodel repository integration tests
         run: |
           cd internal/submodelrepository/integration_tests
           go test -v .
 
-      - name: Run discovery service tests
+      - name: Run submodel element access integration tests
+        run: |
+          cd internal/submodelrepository/integration_tests/element_access_filtering
+          go test -v .
+
+  submodel-repository-query-tests:
+    name: Submodel Repository Query Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run submodel repository query tests
+        run: |
+          cd internal/submodelrepository/query_integration_tests
+          go test -v .
+
+  submodel-repository-unit-tests:
+    name: Submodel Repository Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run submodel repository unit tests
+        run: |
+          go test -v ./internal/submodelrepository/persistence ./internal/submodelrepository/persistence/submodelElements ./internal/submodelrepository/path ./internal/submodelrepository/api
+
+  basyx-configuration-service-unit-tests:
+    name: BaSyx Configuration Service Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run basyx configuration service unit tests
+        run: |
+          go test -v ./internal/basyxconfigurationservice/...
+
+  discovery-service-integration-tests:
+    name: Discovery Service Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run discovery service integration tests
         run: |
           cd internal/discoveryservice/integration_tests
           go test -v
 
-      - name: Run access controll validation tests
-        run: |
-          cd internal/common/security/model/unit_tests
-          go test -v
-      - name: Run aas registry tests
+  discovery-service-unit-tests:
+    name: Discovery Service Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run discovery service unit tests
+        run: go test -v ./internal/discoveryservice/api
+
+  aas-registry-unit-tests:
+    name: AAS Registry Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas registry unit tests
+        run: go test -v ./internal/aasregistry/api ./internal/aasregistry/persistence
+
+  aas-registry-integration-tests:
+    name: AAS Registry Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas registry integration tests
         run: |
           cd internal/aasregistry/integration_tests
           go test -v
-      # - name: Cleanup Docker
-      #   if: always()
-      #   run: |
-      #     cd internal/submodelrepository/integration_tests
-      #     docker compose -f docker_compose/docker_compose.yml down
+
+  aas-registry-security-tests:
+    name: AAS Registry Security Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas registry security tests
+        run: |
+          cd internal/aasregistry/security_tests
+          go test -v
+
+  aas-registry-oidc-security-tests:
+    name: AAS Registry OIDC Security Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas registry OIDC security tests
+        run: |
+          cd internal/aasregistry/security_oidc_tests
+          go test -v
+
+  aas-registry-security-operator-tests:
+    name: AAS Registry Security Operator Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas registry security operator tests
+        run: |
+          cd internal/aasregistry/security_operator_tests
+          go test -v
+
+  aas-registry-security-filter-tests:
+    name: AAS Registry Security Filter Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas registry security filter tests
+        run: |
+          cd internal/aasregistry/security_filter_tests
+          go test -v
+
+  aas-registry-security-index-tests:
+    name: AAS Registry Security Index Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas registry security index tests
+        run: |
+          cd internal/aasregistry/security_index_tests
+          go test -v
+
+  aas-registry-security-match-tests:
+    name: AAS Registry Security Match Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas registry security match tests
+        run: |
+          cd internal/aasregistry/security_match_tests
+          go test -v
+
+  aas-registry-query-tests:
+    name: AAS Registry Query Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas registry query tests
+        run: |
+          cd internal/aasregistry/query_integration_tests
+          go test -v
+
+  digital-twin-registry-integration-tests:
+    name: Digital Twin Registry Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run digital twin registry integration tests
+        run: |
+          cd internal/digitaltwinregistry/integration_tests
+          go test -v
+
+  digital-twin-registry-security-tests:
+    name: Digital Twin Registry Security Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run digital twin registry security tests
+        run: |
+          cd internal/digitaltwinregistry/security_tests
+          go test -v
+
+  digital-twin-registry-unit-tests:
+    name: Digital Twin Registry Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run digital twin registry unit tests
+        run: go test -v ./internal/digitaltwinregistry ./cmd/digitaltwinregistryservice
+
+  aas-environment-unit-tests:
+    name: AAS Environment Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas environment unit tests
+        run: go test -v ./internal/aasenvironment
+
+  aas-environment-integration-tests:
+    name: AAS Environment Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas environment integration tests
+        run: |
+          cd internal/aasenvironment/integration_tests
+          go test -v .
+
+  mcp-unit-tests:
+    name: MCP Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run MCP unit tests
+        run: go test -v ./internal/mcp
+
+  mcp-integration-tests:
+    name: MCP Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run MCP integration tests
+        run: |
+          cd internal/mcp/integration_tests
+          go test -v .
+
+  aas-environment-marker-access-integration-tests:
+    name: CatenaX Example Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas environment marker access integration tests
+        run: |
+          cd internal/aasenvironment/marker_access_integration_tests
+          go test -v .
+
+  aas-environment-preconfiguration-integration-tests:
+    name: AAS Environment Preconfiguration Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas environment preconfiguration integration tests
+        run: |
+          cd internal/aasenvironment/preconfiguration_integration_tests
+          go test -v .
+
+  aas-environment-migration-integration-tests:
+    name: AAS Environment Migration Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas environment migration integration tests
+        run: |
+          cd internal/aasenvironment/migration_integration_tests
+          go test -v .
+
+  aas-environment-security-tests:
+    name: AAS Environment Security Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas environment security and ABAC policy management tests
+        run: |
+          cd internal/aasenvironment/security_tests
+          go test -v .
+
+  digital-twin-registry-tractusx-integration-tests:
+    name: Digital Twin Registry Tractus-X Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run digital twin registry Tractus-X integration tests
+        run: |
+          cd internal/digitaltwinregistry/tractus-x-integrationtests
+          go test -v
+
+  concept-description-repository-integration-tests:
+    name: Concept Description Repository Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run concept description repository integration tests
+        run: |
+          cd internal/conceptdescriptionrepository/integration_tests
+          go test -v .
+
+  concept-description-repository-unit-tests:
+    name: Concept Description Repository Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run concept description repository unit tests
+        run: go test -v ./internal/conceptdescriptionrepository/api
+
+  concept-description-repository-security-tests:
+    name: Concept Description Repository Security Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run concept description repository security tests
+        run: |
+          cd internal/conceptdescriptionrepository/security_tests
+          go test -v .
+
+  submodel-registry-integration-tests:
+    name: Submodel Registry Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run submodel registry integration tests
+        run: |
+          cd internal/smregistry/integration_tests
+          go test -v
+
+  submodel-registry-unit-tests:
+    name: Submodel Registry Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run submodel registry unit tests
+        run: go test -v ./internal/smregistry/api ./internal/smregistry/persistence
+
+  company-lookup-integration-tests:
+    name: Company Lookup Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run company lookup integration tests
+        run: |
+          cd internal/companylookupservice/integration_tests
+          go test -v
+
+  submodel-registry-security-tests:
+    name: Submodel Registry Security Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run submodel registry security tests
+        run: |
+          cd internal/smregistry/security_tests
+          go test -v
+
+
+  submodel-repository-security-tests:
+    name: Submodel Repository Security Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run submodel repository security tests
+        run: |
+          cd internal/submodelrepository/security_tests
+          go test -v
+
+      - name: Run submodel repository security filter tests
+        run: |
+          cd internal/submodelrepository/security_filter_tests
+          go test -v
+
+  aas-repository-unit-tests:
+    name: Asset Administration Shell Repository Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas repository unit tests
+        run: |
+          go test -v ./internal/aasrepository/persistence ./internal/aasrepository/api
+
+  aas-repository-integration-tests:
+    name: Asset Administration Shell Repository Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas repository integration tests
+        run: |
+          cd internal/aasrepository/integration_tests
+          go test -v .
+
+  aas-repository-security-tests:
+    name: Asset Administration Shell Repository Security Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aas repository security tests
+        run: |
+          cd internal/aasrepository/security_tests
+          go test -v .
+
+  rebac-security-tests:
+    name: ReBAC Security Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run ReBAC security tests
+        run: |
+          cd internal/common/security/rebac/integration_tests
+          go test -v .
+
+  aasx-file-server-integration-tests:
+    name: AASX File Server Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aasx file server integration tests
+        run: |
+          cd internal/aasxfileserver/integration_tests
+          go test -v .
+
+  aasx-file-server-unit-tests:
+    name: AASX File Server Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run aasx file server unit tests
+        run: |
+          go test -v ./internal/aasxfileserver/... ./cmd/aasxfileserverservice ./pkg/aasxfileserverapi/go
+
+  dpp-api-integration-tests:
+    name: DPP API Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Build BaSyx configuration image for DPP compose tests
+        run: docker build --no-cache -t eclipsebasyx/basyxconfigurationservice-go:SNAPSHOT -f ./cmd/basyxconfigurationservice/Dockerfile .
+
+      - name: Run dpp api integration tests
+        run: |
+          cd internal/dppapiservice/integration_tests
+          go test -v .
+
+  generated-api-and-tool-unit-tests:
+    name: Generated API and Tool Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Run generated API and tool unit tests
+        run: |
+          go test -v ./internal/healthprobe ./internal/historyevidenceverifier ./pkg/aasrepositoryapi/go ./pkg/conceptdescriptionrepositoryapi/go ./pkg/submodelrepositoryapi ./pkg/dppapiservice/go

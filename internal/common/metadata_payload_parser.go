@@ -1,0 +1,434 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
+package common
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/FriedJannik/aas-go-sdk/jsonization"
+	"github.com/FriedJannik/aas-go-sdk/stringification"
+	"github.com/FriedJannik/aas-go-sdk/types"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
+)
+
+type metadataPatchContextKey string
+
+const (
+	submodelMetadataPatchContextKey        metadataPatchContextKey = "submodelMetadataPatch"
+	submodelElementMetadataPatchContextKey metadataPatchContextKey = "submodelElementMetadataPatch"
+)
+
+func parseStringField(raw any, field string) (string, error) {
+	value, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("%s must be a string", field)
+	}
+	return value, nil
+}
+
+func parseMapField(raw any, field string) (map[string]any, error) {
+	value, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be an object", field)
+	}
+	return value, nil
+}
+
+func parseArrayField(raw any, field string) ([]any, error) {
+	value, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be an array", field)
+	}
+	return value, nil
+}
+
+func parseLangStringTextTypes(raw any, field string) ([]types.ILangStringTextType, error) {
+	items, err := parseArrayField(raw, field)
+	if err != nil {
+		return nil, err
+	}
+
+	values := make([]types.ILangStringTextType, 0, len(items))
+	for _, item := range items {
+		parsed, parseErr := jsonization.LangStringTextTypeFromJsonable(item)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		values = append(values, parsed)
+	}
+
+	return values, nil
+}
+
+func parseLangStringNameTypes(raw any, field string) ([]types.ILangStringNameType, error) {
+	items, err := parseArrayField(raw, field)
+	if err != nil {
+		return nil, err
+	}
+
+	values := make([]types.ILangStringNameType, 0, len(items))
+	for _, item := range items {
+		parsed, parseErr := jsonization.LangStringNameTypeFromJsonable(item)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		values = append(values, parsed)
+	}
+
+	return values, nil
+}
+
+func parseExtensions(raw any, field string) ([]types.IExtension, error) {
+	items, err := parseArrayField(raw, field)
+	if err != nil {
+		return nil, err
+	}
+
+	values := make([]types.IExtension, 0, len(items))
+	for _, item := range items {
+		parsed, parseErr := jsonization.ExtensionFromJsonable(item)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		values = append(values, parsed)
+	}
+
+	return values, nil
+}
+
+func parseAdministration(raw any, field string) (types.IAdministrativeInformation, error) {
+	item, err := parseMapField(raw, field)
+	if err != nil {
+		return nil, err
+	}
+
+	return jsonization.AdministrativeInformationFromJsonable(item)
+}
+
+func parseEmbeddedDataSpecifications(raw any, field string) ([]types.IEmbeddedDataSpecification, error) {
+	items, err := parseArrayField(raw, field)
+	if err != nil {
+		return nil, err
+	}
+
+	values := make([]types.IEmbeddedDataSpecification, 0, len(items))
+	for _, item := range items {
+		parsed, parseErr := jsonization.EmbeddedDataSpecificationFromJsonable(item)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		values = append(values, parsed)
+	}
+
+	return values, nil
+}
+
+func parseQualifiers(raw any, field string) ([]types.IQualifier, error) {
+	items, err := parseArrayField(raw, field)
+	if err != nil {
+		return nil, err
+	}
+
+	values := make([]types.IQualifier, 0, len(items))
+	for _, item := range items {
+		parsed, parseErr := jsonization.QualifierFromJsonable(item)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		values = append(values, parsed)
+	}
+
+	return values, nil
+}
+
+func parseReference(raw any, field string) (types.IReference, error) {
+	item, err := parseMapField(raw, field)
+	if err != nil {
+		return nil, err
+	}
+
+	return jsonization.ReferenceFromJsonable(item)
+}
+
+func parseReferences(raw any, field string) ([]types.IReference, error) {
+	items, err := parseArrayField(raw, field)
+	if err != nil {
+		return nil, err
+	}
+
+	values := make([]types.IReference, 0, len(items))
+	for _, item := range items {
+		parsed, parseErr := jsonization.ReferenceFromJsonable(item)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		values = append(values, parsed)
+	}
+
+	return values, nil
+}
+
+func parseBoolField(raw any, field string) (bool, error) {
+	value, ok := raw.(bool)
+	if !ok {
+		return false, fmt.Errorf("%s must be a boolean", field)
+	}
+	return value, nil
+}
+
+func parseEnumField[T any](raw any, field string, fromString func(string) (T, bool)) (T, error) {
+	var zero T
+	literal, err := parseStringField(raw, field)
+	if err != nil {
+		return zero, err
+	}
+
+	value, ok := fromString(literal)
+	if !ok {
+		return zero, fmt.Errorf("%s has unsupported value '%s'", field, literal)
+	}
+
+	return value, nil
+}
+
+func parseModelType(raw any, field string) (types.ModelType, error) {
+	return parseEnumField(raw, field, stringification.ModelTypeFromString)
+}
+
+func parseModellingKind(raw any, field string) (types.ModellingKind, error) {
+	return parseEnumField(raw, field, stringification.ModellingKindFromString)
+}
+
+func parseMetadataPayload(raw any) (map[string]any, error) {
+	payload, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("metadata payload must be an object")
+	}
+	return payload, nil
+}
+
+func cloneAnyMap(input map[string]any) map[string]any {
+	cloned := make(map[string]any, len(input))
+	for key, value := range input {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+// MergeMetadataPatch merges object fields recursively, replaces arrays, and
+// removes fields explicitly set to null without changing either input.
+func MergeMetadataPatch(base, patch map[string]any) map[string]any {
+	merged := cloneAnyMap(base)
+	for key, value := range patch {
+		if value == nil {
+			delete(merged, key)
+			continue
+		}
+		previous, hasPrevious := merged[key].(map[string]any)
+		object, isObject := value.(map[string]any)
+		if hasPrevious && isObject {
+			merged[key] = MergeMetadataPatch(previous, object)
+		} else {
+			merged[key] = value
+		}
+	}
+	return merged
+}
+
+// WithSubmodelMetadataPatch stores raw metadata PATCH payload in the context.
+func WithSubmodelMetadataPatch(ctx context.Context, payload map[string]any) context.Context {
+	return context.WithValue(ctx, submodelMetadataPatchContextKey, cloneAnyMap(payload))
+}
+
+// GetSubmodelMetadataPatch reads raw metadata PATCH payload from the context.
+func GetSubmodelMetadataPatch(ctx context.Context) (map[string]any, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	payload, ok := ctx.Value(submodelMetadataPatchContextKey).(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	return cloneAnyMap(payload), true
+}
+
+// WithSubmodelElementMetadataPatch stores raw submodel-element metadata PATCH payload in the context.
+func WithSubmodelElementMetadataPatch(ctx context.Context, payload map[string]any) context.Context {
+	return context.WithValue(ctx, submodelElementMetadataPatchContextKey, cloneAnyMap(payload))
+}
+
+// GetSubmodelElementMetadataPatch reads raw submodel-element metadata PATCH payload from the context.
+func GetSubmodelElementMetadataPatch(ctx context.Context) (map[string]any, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	payload, ok := ctx.Value(submodelElementMetadataPatchContextKey).(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	return cloneAnyMap(payload), true
+}
+
+// ParseSubmodelMetadataPayload parses metadata PATCH payloads into SubmodelMetadata.
+func ParseSubmodelMetadataPayload(raw any) (model.SubmodelMetadata, error) {
+	payload, err := parseMetadataPayload(raw)
+	if err != nil {
+		return model.SubmodelMetadata{}, fmt.Errorf("SMREPO-PARSESMMETA-INVALIDPAYLOAD %w", err)
+	}
+
+	metadata := model.SubmodelMetadata{}
+	for field, value := range payload {
+		if value == nil {
+			switch field {
+			case "extensions", "category", "idShort", "displayName", "description", "administration", "embeddedDataSpecifications", "qualifiers", "semanticId", "supplementalSemanticIds", "kind":
+				continue
+			case "modelType", "id":
+				return model.SubmodelMetadata{}, fmt.Errorf("SMREPO-PARSESMMETA-INVALIDFIELD invalid metadata field '%s': %s must not be null", field, field)
+			default:
+				return model.SubmodelMetadata{}, fmt.Errorf("SMREPO-PARSESMMETA-UNKNOWNFIELD unknown metadata field '%s'", field)
+			}
+		}
+
+		switch field {
+		case "extensions":
+			metadata.Extensions, err = parseExtensions(value, field)
+		case "category":
+			metadata.Category, err = parseStringField(value, field)
+		case "idShort":
+			metadata.IdShort, err = parseStringField(value, field)
+		case "displayName":
+			metadata.DisplayName, err = parseLangStringNameTypes(value, field)
+		case "description":
+			metadata.Description, err = parseLangStringTextTypes(value, field)
+		case "modelType":
+			metadata.ModelType, err = parseModelType(value, field)
+		case "administration":
+			metadata.Administration, err = parseAdministration(value, field)
+		case "id":
+			metadata.ID, err = parseStringField(value, field)
+		case "embeddedDataSpecifications":
+			metadata.EmbeddedDataSpecifications, err = parseEmbeddedDataSpecifications(value, field)
+		case "qualifiers":
+			metadata.Qualifiers, err = parseQualifiers(value, field)
+		case "semanticId":
+			metadata.SemanticID, err = parseReference(value, field)
+		case "supplementalSemanticIds":
+			metadata.SupplementalSemanticIds, err = parseReferences(value, field)
+		case "kind":
+			metadata.Kind, err = parseModellingKind(value, field)
+		default:
+			return model.SubmodelMetadata{}, fmt.Errorf("SMREPO-PARSESMMETA-UNKNOWNFIELD unknown metadata field '%s'", field)
+		}
+
+		if err != nil {
+			return model.SubmodelMetadata{}, fmt.Errorf("SMREPO-PARSESMMETA-INVALIDFIELD invalid metadata field '%s': %w", field, err)
+		}
+	}
+
+	if metadata.ModelType == 0 {
+		return model.SubmodelMetadata{}, fmt.Errorf("SMREPO-PARSESMMETA-MISSINGMODELTYPE metadata payload requires modelType")
+	}
+
+	return metadata, nil
+}
+
+// ParseSubmodelElementMetadataPayload parses metadata PATCH payloads into SubmodelElementMetadata.
+// Type-specific metadata fields of the payload's modelType are validated but
+// remain only in the raw payload.
+func ParseSubmodelElementMetadataPayload(raw any) (model.SubmodelElementMetadata, error) {
+	payload, err := parseMetadataPayload(raw)
+	if err != nil {
+		return model.SubmodelElementMetadata{}, fmt.Errorf("SMREPO-PARSESMEMETA-INVALIDPAYLOAD %w", err)
+	}
+
+	modelType, _ := payload["modelType"].(string)
+	metadata := model.SubmodelElementMetadata{}
+	for field, value := range payload {
+		if err := parseSubmodelElementMetadataField(&metadata, modelType, field, value); err != nil {
+			return model.SubmodelElementMetadata{}, err
+		}
+	}
+
+	if metadata.ModelType == 0 {
+		return model.SubmodelElementMetadata{}, fmt.Errorf("SMREPO-PARSESMEMETA-MISSINGMODELTYPE metadata payload requires modelType")
+	}
+
+	return metadata, nil
+}
+
+func parseSubmodelElementMetadataField(metadata *model.SubmodelElementMetadata, modelType string, field string, value any) error {
+	validateTypeSpecific, isTypeSpecific := submodelElementTypeSpecificMetadataFields[modelType][field]
+	_, isCommon := submodelElementMetadataCommonFields[field]
+	switch {
+	case !isTypeSpecific && !isCommon:
+		return fmt.Errorf("SMREPO-PARSESMEMETA-UNKNOWNFIELD unknown metadata field '%s'", field)
+	case value == nil && (isTypeSpecific || field == "modelType"):
+		return fmt.Errorf("SMREPO-PARSESMEMETA-INVALIDFIELD invalid metadata field '%s': %s must not be null", field, field)
+	case value == nil:
+		return nil
+	}
+
+	var err error
+	if isTypeSpecific {
+		err = validateTypeSpecific(value, field)
+	} else {
+		err = setCommonSubmodelElementMetadataField(metadata, field, value)
+	}
+	if err != nil {
+		return fmt.Errorf("SMREPO-PARSESMEMETA-INVALIDFIELD invalid metadata field '%s': %w", field, err)
+	}
+	return nil
+}
+
+func setCommonSubmodelElementMetadataField(metadata *model.SubmodelElementMetadata, field string, value any) error {
+	var err error
+	switch field {
+	case "extensions":
+		metadata.Extensions, err = parseExtensions(value, field)
+	case "category":
+		metadata.Category, err = parseStringField(value, field)
+	case "idShort":
+		metadata.IdShort, err = parseStringField(value, field)
+	case "displayName":
+		metadata.DisplayName, err = parseLangStringNameTypes(value, field)
+	case "description":
+		metadata.Description, err = parseLangStringTextTypes(value, field)
+	case "modelType":
+		metadata.ModelType, err = parseModelType(value, field)
+	case "embeddedDataSpecifications":
+		metadata.EmbeddedDataSpecifications, err = parseEmbeddedDataSpecifications(value, field)
+	case "semanticId":
+		metadata.SemanticID, err = parseReference(value, field)
+	case "supplementalSemanticIds":
+		metadata.SupplementalSemanticIds, err = parseReferences(value, field)
+	case "qualifiers":
+		metadata.Qualifiers, err = parseQualifiers(value, field)
+	case "kind":
+		metadata.Kind, err = parseModellingKind(value, field)
+	}
+	return err
+}

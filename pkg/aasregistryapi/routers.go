@@ -5,16 +5,16 @@
  *
  * The Full Profile of the Asset Administration Shell Registry Service Specification as part of the [Specification of the Asset Administration Shell: Part 2](https://industrialdigitaltwin.org/en/content-hub/aasspecifications).   Copyright: Industrial Digital Twin Association (IDTA) 2025
  *
- * API version: V3.1.1_SSP-001
+ * API version: V3.2.0
  * Contact: info@idtwin.org
  */
 
 package apis
 
 import (
-    "net/http"
+	"net/http"
 
-    "github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5"
 )
 
 // A Route defines the parameters for an api endpoint
@@ -36,14 +36,14 @@ type Router interface {
 
 // NewRouter creates a new router for any number of api routers
 func NewRouter(routers ...Router) chi.Router {
-    router := chi.NewRouter()
-    for _, api := range routers {
-        for _, route := range api.OrderedRoutes() {
-            var handler http.Handler = route.HandlerFunc
-            handler = Logger(handler, route.Name)
-            router.Method(route.Method, route.Pattern, handler)
-        }
-    }
+	router := chi.NewRouter()
+	for _, api := range routers {
+		for _, route := range api.OrderedRoutes() {
+			var handler http.Handler = route.HandlerFunc
+			handler = Logger(handler, route.Name)
+			router.Method(route.Method, route.Pattern, handler)
+		}
+	}
 
-    return router
+	return router
 }

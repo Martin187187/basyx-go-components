@@ -1,0 +1,233 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+// Author: Jannik Fried ( Fraunhofer IESE )
+
+// Package submodelelements provides handlers for different types of submodel elements in the BaSyx framework.
+// This package contains PostgreSQL-based persistence implementations for various submodel element types
+// including blob elements for binary data storage.
+package submodelelements
+
+import (
+	"context"
+	"database/sql"
+	"log/slog"
+
+	"github.com/FriedJannik/aas-go-sdk/types"
+	"github.com/doug-martin/goqu/v9"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	gen "github.com/eclipse-basyx/basyx-go-components/internal/common/model"
+	smrepoconfig "github.com/eclipse-basyx/basyx-go-components/internal/submodelrepository/config"
+	smrepoerrors "github.com/eclipse-basyx/basyx-go-components/internal/submodelrepository/errors"
+	persistenceutils "github.com/eclipse-basyx/basyx-go-components/internal/submodelrepository/persistence/utils"
+)
+
+// PostgreSQLBlobHandler provides PostgreSQL-based persistence operations for Blob submodel elements.
+// It implements CRUD operations and handles binary data storage with content type information.
+// Blob elements are used to store binary data such as images, documents, or other files within submodels.
+type PostgreSQLBlobHandler struct {
+	db        *sql.DB
+	decorated *PostgreSQLSMECrudHandler
+}
+
+// NewPostgreSQLBlobHandler creates a new handler for Blob element persistence.
+// It initializes the handler with a database connection and sets up the decorated CRUD handler
+// for common submodel element operations.
+//
+// Parameters:
+//   - db: PostgreSQL database connection
+//
+// Returns:
+//   - *PostgreSQLBlobHandler: Configured handler instance
+//   - error: Error if handler initialization fails
+func NewPostgreSQLBlobHandler(db *sql.DB) (*PostgreSQLBlobHandler, error) {
+	decoratedHandler, err := NewPostgreSQLSMECrudHandler(db)
+	if err != nil {
+		return nil, err
+	}
+	return &PostgreSQLBlobHandler{db: db, decorated: decoratedHandler}, nil
+}
+
+// Update modifies an existing Blob element identified by its idShort or path.
+// This method handles both the common submodel element properties and the specific blob
+// data including content type and binary value storage.
+//
+// Parameters:
+//   - submodelID: ID of the parent submodel
+//   - idShortOrPath: idShort or hierarchical path to the element to update
+//   - submodelElement: Updated element data
+//   - tx: Active database transaction (can be nil, will create one if needed)
+//   - isPut: true: Replaces the Submodel Element with the Body Data (Deletes non-specified fields); false: Updates only passed request body data, unspecified is ignored
+//
+// Returns:
+//   - error: Error if update fails
+func (p PostgreSQLBlobHandler) Update(submodelID string, idShortOrPath string, submodelElement types.ISubmodelElement, tx *sql.Tx, isPut bool) error {
+	blob, ok := submodelElement.(*types.Blob)
+	if !ok {
+		return common.NewErrBadRequest("submodelElement is not of type Blob")
+	}
+
+	var err error
+	cu, localTx, err := common.StartTXIfNeeded(tx, err, p.db)
+	if err != nil {
+		return err
+	}
+	defer cu(&err)
+	if isBlobSizeExceeded(blob) {
+		return smrepoerrors.ErrBlobTooLarge
+	}
+
+	smDbID, err := persistenceutils.GetSubmodelDatabaseID(localTx, submodelID)
+	if err != nil {
+		slog.Error("submodel database ID lookup failed", "error.code", "SMREPO-SMEUPDATE-GETSMDBID", "error", err)
+		return common.NewInternalServerError("Failed to execute PostgreSQL Query - no changes applied - see console for details.")
+	}
+	elementID, err := p.decorated.GetDatabaseIDWithTx(localTx, smDbID, idShortOrPath)
+	if err != nil {
+		return err
+	}
+
+	dialect := goqu.Dialect("postgres")
+
+	// Build the update record based on isPut flag
+	// For PUT: always update all fields (even if empty, which clears them)
+	// For PATCH: only update fields that are provided (not empty)
+	updateRecord := buildUpdateBlobRecordObject(isPut, blob)
+
+	if anyFieldsToUpdate(updateRecord) {
+		updateQuery, updateArgs, err := dialect.Update("blob_element").
+			Set(updateRecord).
+			Where(goqu.C("id").Eq(elementID)).
+			ToSQL()
+		if err != nil {
+			return err
+		}
+
+		_, err = localTx.Exec(updateQuery, updateArgs...)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = p.decorated.Update(submodelID, idShortOrPath, submodelElement, localTx, isPut)
+	if err != nil {
+		return err
+	}
+
+	return common.CommitTransactionIfNeeded(tx, localTx)
+}
+
+// UpdateValueOnly stores the decoded ValueOnly content type and content of a Blob.
+// Content is stored in the same encoding as on insert; absent fields stay untouched.
+func (p PostgreSQLBlobHandler) UpdateValueOnly(ctx context.Context, tx *sql.Tx, update gen.ValueOnlyUpdate) error {
+	patch, err := valueOnlyPatchAs[gen.BlobValuePatch](update)
+	if err != nil {
+		return err
+	}
+	record := goqu.Record{}
+	if patch.ContentType != nil {
+		record["content_type"] = *patch.ContentType
+	}
+	if patch.Value != nil {
+		if len(*patch.Value) > smrepoconfig.MaxBlobSizeBytes {
+			return smrepoerrors.ErrBlobTooLarge
+		}
+		record["value"] = common.Encode(*patch.Value)
+	}
+	return execValueOnlyUpdate(ctx, tx, "blob_element", record, update.ElementID, "SMREPO-UPDBLOBVALONLY")
+}
+
+// Delete removes a Blob element identified by its idShort or path from the database.
+// This method delegates the deletion operation to the decorated CRUD handler which handles
+// the cascading deletion of all related data and child elements.
+//
+// Parameters:
+//   - idShortOrPath: idShort or hierarchical path to the element to delete
+//
+// Returns:
+//   - error: Error if deletion fails
+func (p PostgreSQLBlobHandler) Delete(idShortOrPath string) error {
+	return p.decorated.Delete(idShortOrPath)
+}
+
+// GetInsertQueryPart returns the type-specific insert query part for batch insertion of Blob elements.
+// It returns the table name and record for inserting into the blob_element table.
+//
+// Parameters:
+//   - tx: Active database transaction (not used for Blob)
+//   - id: The database ID of the base submodel_element record
+//   - element: The Blob element to insert
+//
+// Returns:
+//   - *InsertQueryPart: The table name and record for blob_element insert
+//   - error: An error if the element is not of type Blob
+func (p PostgreSQLBlobHandler) GetInsertQueryPart(_ *sql.Tx, id int, element types.ISubmodelElement) (*InsertQueryPart, error) {
+	blob, ok := element.(*types.Blob)
+	if !ok {
+		return nil, common.NewErrBadRequest("submodelElement is not of type Blob")
+	}
+
+	contentType := ""
+	if blob.ContentType() != nil {
+		contentType = *blob.ContentType()
+	}
+
+	// encode value to base64
+	encoded := common.Encode(blob.Value())
+
+	return &InsertQueryPart{
+		TableName: "blob_element",
+		Record: goqu.Record{
+			"id":           id,
+			"content_type": contentType,
+			"value":        encoded,
+		},
+	}, nil
+}
+
+func isBlobSizeExceeded(blob *types.Blob) bool {
+	return len(blob.Value()) > smrepoconfig.MaxBlobSizeBytes
+}
+
+func buildUpdateBlobRecordObject(isPut bool, blob *types.Blob) goqu.Record {
+	updateRecord := goqu.Record{}
+
+	contentType := ""
+	if blob.ContentType() != nil {
+		contentType = *blob.ContentType()
+	}
+	if isPut || contentType != "" {
+		var contentTypeNull sql.NullString
+		if contentType != "" {
+			contentTypeNull = sql.NullString{String: contentType, Valid: true}
+		}
+		updateRecord["content_type"] = contentTypeNull
+	}
+
+	value := blob.Value()
+	if isPut || len(value) > 0 {
+		updateRecord["value"] = common.Encode(value)
+	}
+	return updateRecord
+}

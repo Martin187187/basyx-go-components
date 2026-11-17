@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -23,14 +23,39 @@
 * SPDX-License-Identifier: MIT
 ******************************************************************************/
 
-//nolint:revive
+//nolint:all
 package common
 
 import (
+	"bufio"
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"mime"
 	"net/http"
+	"path/filepath"
+	"strings"
 
+	aasjsonization "github.com/FriedJannik/aas-go-sdk/jsonization"
+	aastypes "github.com/FriedJannik/aas-go-sdk/types"
+	"github.com/FriedJannik/aas-go-sdk/verification"
+	aasxmlization "github.com/FriedJannik/aas-go-sdk/xmlization"
+	aasx "github.com/aas-core-works/aas-package3-golang/v2"
 	"github.com/go-chi/chi/v5"
 )
+
+const verifyMaxPayloadBytes = 128 << 20
+const verifyMultipartFileField = "file"
+const verifyMultipartPayloadField = "payload"
+
+// HealthProbe reports if the service is healthy and optionally returns detail text.
+type HealthProbe func() (bool, string)
 
 // AddHealthEndpoint registers a health check endpoint on the provided router.
 //
@@ -61,11 +86,745 @@ import (
 //	  "status": "UP"
 //	}
 func AddHealthEndpoint(r *chi.Mux, config *Config) {
+	AddHealthEndpointWithProbe(r, config, nil)
+}
+
+// AddHealthEndpointWithProbe registers a health endpoint with optional readiness probing.
+func AddHealthEndpointWithProbe(r *chi.Mux, config *Config, probe HealthProbe) {
 	r.Get(config.Server.ContextPath+"/health", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, err := w.Write([]byte("{\"status\":\"UP\"}"))
+		if probe != nil {
+			healthy, details := probe()
+			if !healthy {
+				response := map[string]string{"status": "DOWN"}
+				if strings.TrimSpace(details) != "" {
+					response["details"] = details
+				}
+				writeHealthResponse(w, http.StatusServiceUnavailable, response)
+				return
+			}
+		}
+
+		writeHealthResponse(w, http.StatusOK, map[string]string{"status": "UP"})
+	})
+}
+
+func writeHealthResponse(w http.ResponseWriter, statusCode int, body map[string]string) {
+	responsePayload, err := json.Marshal(body)
+	if err != nil {
+		slog.Error("health response marshaling failed", "error.code", "COMMON-WRITEHEALTH-MARSHAL", "error", err)
+		_ = WriteErrorResponse(w, err, http.StatusInternalServerError, "COMMON", "WriteHealthResponse", "MarshalResponse")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	if _, err = w.Write(responsePayload); err != nil {
+		slog.Error("health response write failed", "error.code", "COMMON-WRITEHEALTH-WRITE", "error", err)
+	}
+}
+
+// AddVerificationEndpoint registers POST /verify relative to the provided API router.
+// The endpoint accepts JSON, XML, or AASX and verifies it against the AAS meta
+// model. Callers must provide the service API router so configured security
+// middleware applies before payload parsing.
+//
+// Parameters:
+//   - r: Protected API router receiving POST /verify.
+//   - config: Process configuration providing upload and AASX expansion limits.
+//   - stagers: Optional external seekable-storage provider for bounded AASX verification.
+func AddVerificationEndpoint(r chi.Router, config *Config, stagers ...UploadStager) {
+	r.Post("/verify", func(w http.ResponseWriter, r *http.Request) {
+		maxPayloadBytes := verificationMaxPayloadBytes(config)
+		maxRequestBytes := maxPayloadBytes
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))), "multipart/form-data") {
+			maxRequestBytes = MultipartRequestSizeLimit(maxPayloadBytes)
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
+		r = r.WithContext(ContextWithConfig(r.Context(), config))
+
+		var verificationResult map[string]interface{}
+		var err error
+		if len(stagers) > 0 && stagers[0] != nil {
+			verificationResult, err = verifyStagedRequest(w, r, stagers[0], maxPayloadBytes)
+		} else {
+			verificationResult, err = VerifyPayload(r)
+		}
 		if err != nil {
-			http.Error(w, "Failed to write response", http.StatusInternalServerError)
+			var maxBytesError *http.MaxBytesError
+			if errors.As(err, &maxBytesError) || IsErrPayloadTooLarge(err) || errors.Is(err, aasx.ErrReaderLimitExceeded) {
+				slog.WarnContext(
+					r.Context(),
+					"verification payload exceeds configured size limit",
+					"error.code", "COMMON-VERIFY-PAYLOAD-MAXSIZE",
+					"limit.bytes", maxPayloadBytes,
+					"error", err,
+				)
+				_ = WriteErrorResponse(
+					w,
+					fmt.Errorf("payload exceeds max size of %d bytes", maxPayloadBytes),
+					http.StatusRequestEntityTooLarge,
+					"COMMON",
+					"VerifyPayload",
+					"PayloadTooLarge",
+				)
+				return
+			}
+			if IsErrServiceUnavailable(err) {
+				_ = WriteErrorResponse(w, err, http.StatusServiceUnavailable, "COMMON", "VerifyPayload", "ServiceUnavailable")
+				return
+			}
+			if IsInternalServerError(err) {
+				_ = WriteErrorResponse(w, err, http.StatusInternalServerError, "COMMON", "VerifyPayload", "InternalServerError")
+				return
+			}
+
+			slog.ErrorContext(r.Context(), "payload verification failed", "error.code", "COMMON-VERIFY-PAYLOAD", "error", err)
+			_ = WriteErrorResponse(w, err, http.StatusBadRequest, "COMMON", "VerifyPayload", "InvalidPayload")
+			return
+		}
+
+		responsePayload, err := json.Marshal(verificationResult)
+		if err != nil {
+			slog.ErrorContext(r.Context(), "verification result marshaling failed", "error.code", "COMMON-VERIFY-PAYLOAD-MARSHAL", "error", err)
+			_ = WriteErrorResponse(w, err, http.StatusInternalServerError, "COMMON", "VerifyPayload", "MarshalResponse")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if _, err = w.Write(responsePayload); err != nil {
+			slog.ErrorContext(r.Context(), "verification response write failed", "error.code", "COMMON-VERIFY-PAYLOAD-WRITE", "error", err)
 		}
 	})
+}
+
+func verifyStagedRequest(w http.ResponseWriter, r *http.Request, stager UploadStager, maximum int64) (map[string]interface{}, error) {
+	var staged StagedUpload
+	fileName := ""
+	contentType := strings.TrimSpace(r.Header.Get("Content-Type"))
+	if strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
+		upload, err := readMultipartUploadFields(w, r, maximum, func(ctx context.Context, partFileName string, partContentType string, input io.Reader, partMaximum int64) (StagedUpload, error) {
+			return stageVerificationPayload(ctx, input, partFileName, partContentType, stager, partMaximum)
+		}, verifyMultipartFileField, verifyMultipartPayloadField)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = upload.Close() }()
+		staged = upload.File
+		fileName = upload.MultipartFileName
+		contentType = upload.FileContentType
+	} else {
+		var err error
+		staged, err = stageVerificationPayload(r.Context(), r.Body, fileName, contentType, stager, maximum)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = staged.Close() }()
+	}
+	return verifyStagedPayload(r.Context(), staged, fileName, contentType, maximum)
+}
+
+type verificationMemoryStage struct {
+	*bytes.Reader
+	content []byte
+}
+
+func (stage *verificationMemoryStage) Size() int64 {
+	return stage.Reader.Size()
+}
+
+func (stage *verificationMemoryStage) Close() error {
+	return nil
+}
+
+func (stage *verificationMemoryStage) Promote(context.Context, func(context.Context, *sql.Tx, int64, int64) error) error {
+	return NewInternalServerError("COMMON-VERIFYMEMORY-PROMOTE verification payloads cannot be promoted")
+}
+
+func stageVerificationPayload(ctx context.Context, input io.Reader, fileName string, contentType string, stager UploadStager, maximum int64) (StagedUpload, error) {
+	buffered := bufio.NewReader(input)
+	signature, peekErr := buffered.Peek(512)
+	if peekErr != nil && !errors.Is(peekErr, io.EOF) && !errors.Is(peekErr, bufio.ErrBufferFull) {
+		return nil, fmt.Errorf("COMMON-VERIFYSTAGE-READSIGNATURE %w", peekErr)
+	}
+	format, err := detectVerificationFormat(fileName, contentType, signature)
+	if err != nil {
+		return nil, fmt.Errorf("COMMON-VERIFYSTAGE-DETECTFORMAT %w", err)
+	}
+	if format == "aasx" {
+		return stager(ctx, buffered, maximum)
+	}
+	content, err := io.ReadAll(io.LimitReader(buffered, maximum+1))
+	if err != nil {
+		return nil, fmt.Errorf("COMMON-VERIFYSTAGE-READPAYLOAD %w", err)
+	}
+	if int64(len(content)) > maximum {
+		return nil, NewErrPayloadTooLarge(fmt.Sprintf("COMMON-VERIFYSTAGE-TOOLARGE payload exceeds configured maximum of %d bytes", maximum))
+	}
+	return &verificationMemoryStage{Reader: bytes.NewReader(content), content: content}, nil
+}
+
+func verifyStagedPayload(ctx context.Context, payload io.ReadSeeker, fileName string, contentType string, maximum int64) (map[string]interface{}, error) {
+	signature := make([]byte, 512)
+	count, err := payload.Read(signature)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("COMMON-VERIFYSTAGED-READSIGNATURE %w", err)
+	}
+	if _, err = payload.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("COMMON-VERIFYSTAGED-SEEK %w", err)
+	}
+	format, err := detectVerificationFormat(fileName, contentType, signature[:count])
+	if err != nil {
+		return nil, fmt.Errorf("COMMON-VERIFYSTAGED-DETECTFORMAT %w", err)
+	}
+	var target aastypes.IClass
+	if format == "aasx" {
+		target, err = parseVerificationAASXEnvironmentStream(ctx, payload)
+	} else {
+		content, readErr := readVerificationStagedContent(payload, maximum)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if int64(len(content)) > maximum {
+			return nil, NewErrPayloadTooLarge(fmt.Sprintf("COMMON-VERIFYSTAGED-TOOLARGE payload exceeds configured maximum of %d bytes", maximum))
+		}
+		target, err = parseVerificationTarget(format, content)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("COMMON-VERIFYSTAGED-PARSE %w", err)
+	}
+	return verificationResult(target, format), nil
+}
+
+func readVerificationStagedContent(payload io.ReadSeeker, maximum int64) ([]byte, error) {
+	if memoryPayload, ok := payload.(*verificationMemoryStage); ok {
+		return memoryPayload.content, nil
+	}
+	content, err := io.ReadAll(io.LimitReader(payload, maximum+1))
+	if err != nil {
+		return nil, fmt.Errorf("COMMON-VERIFYSTAGED-READPAYLOAD %w", err)
+	}
+	return content, nil
+}
+
+func verificationResult(target aastypes.IClass, format string) map[string]interface{} {
+	messages := collectVerificationMessages(target)
+	aasCount, submodelCount, conceptDescriptionCount := verificationCounts(target)
+	return map[string]interface{}{
+		"valid": len(messages) == 0, "format": format,
+		"assetAdministrationShellCount": aasCount,
+		"submodelCount":                 submodelCount, "conceptDescriptionCount": conceptDescriptionCount,
+		"messages": messages,
+	}
+}
+
+func verificationMaxPayloadBytes(config *Config) int64 {
+	if config != nil && config.General.UploadMaxSizeBytes > 0 {
+		return config.General.UploadMaxSizeBytes
+	}
+
+	return verifyMaxPayloadBytes
+}
+
+// VerifyPayload verifies the request payload and returns a structured result. It supports JSON, XML, and AASX formats.
+func VerifyPayload(r *http.Request) (map[string]interface{}, error) {
+	payload, fileName, contentType, err := readVerificationPayload(r)
+	if err != nil {
+		return nil, fmt.Errorf("COMMON-VERIFYPAYLOAD-READPAYLOAD %w", err)
+	}
+
+	format, err := detectVerificationFormat(fileName, contentType, payload)
+	if err != nil {
+		return nil, fmt.Errorf("COMMON-VERIFYPAYLOAD-DETECTFORMAT %w", err)
+	}
+
+	target, err := parseVerificationTarget(format, payload)
+	if err != nil {
+		return nil, fmt.Errorf("COMMON-VERIFYPAYLOAD-PARSE %w", err)
+	}
+
+	messages := collectVerificationMessages(target)
+	aasCount, submodelCount, conceptDescriptionCount := verificationCounts(target)
+
+	return map[string]interface{}{
+		"valid":                         len(messages) == 0,
+		"format":                        format,
+		"assetAdministrationShellCount": aasCount,
+		"submodelCount":                 submodelCount,
+		"conceptDescriptionCount":       conceptDescriptionCount,
+		"messages":                      messages,
+	}, nil
+
+}
+
+func readVerificationPayload(r *http.Request) ([]byte, string, string, error) {
+	if r == nil {
+		return nil, "", "", fmt.Errorf("request is nil")
+	}
+
+	headerContentType := strings.TrimSpace(r.Header.Get("Content-Type"))
+	if strings.HasPrefix(strings.ToLower(headerContentType), "multipart/form-data") {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			return nil, "", "", fmt.Errorf("failed to parse multipart form: %w", err)
+		}
+
+		file, fileHeader, fileErr := r.FormFile(verifyMultipartFileField)
+		if fileErr == nil {
+			defer func() {
+				_ = file.Close()
+			}()
+
+			maxPayloadBytes := verificationMaxPayloadBytesFromRequest(r)
+			payload, err := io.ReadAll(io.LimitReader(file, maxPayloadBytes+1))
+			if err != nil {
+				return nil, "", "", fmt.Errorf("failed to read multipart file payload: %w", err)
+			}
+			if int64(len(payload)) > maxPayloadBytes {
+				return nil, "", "", NewErrPayloadTooLarge(fmt.Sprintf("COMMON-VERIFYPAYLOAD-MULTIPARTTOOLARGE payload exceeds max size of %d bytes", maxPayloadBytes))
+			}
+			if len(bytes.TrimSpace(payload)) == 0 {
+				return nil, "", "", fmt.Errorf("payload is empty")
+			}
+
+			fileContentType := strings.TrimSpace(fileHeader.Header.Get("Content-Type"))
+			if fileContentType == "" {
+				fileContentType = headerContentType
+			}
+
+			return payload, fileHeader.Filename, fileContentType, nil
+		}
+
+		maxPayloadBytes := verificationMaxPayloadBytesFromRequest(r)
+		payloadText := r.FormValue(verifyMultipartPayloadField)
+		payload := []byte(payloadText)
+		if int64(len(payload)) > maxPayloadBytes {
+			return nil, "", "", NewErrPayloadTooLarge(fmt.Sprintf("COMMON-VERIFYPAYLOAD-FIELDTOOLARGE payload exceeds max size of %d bytes", maxPayloadBytes))
+		}
+		if len(bytes.TrimSpace(payload)) == 0 {
+			return nil, "", "", fmt.Errorf(
+				"failed to read multipart field '%s' and multipart text field '%s' is empty",
+				verifyMultipartFileField,
+				verifyMultipartPayloadField,
+			)
+		}
+
+		return payload, "", "", nil
+	}
+
+	if r.Body == nil {
+		return nil, "", "", fmt.Errorf("request body is empty")
+	}
+	defer func() {
+		_ = r.Body.Close()
+	}()
+
+	maxPayloadBytes := verificationMaxPayloadBytesFromRequest(r)
+	payload, err := io.ReadAll(io.LimitReader(r.Body, maxPayloadBytes+1))
+	if err != nil {
+		return nil, "", "", fmt.Errorf("failed to read request body: %w", err)
+	}
+	if int64(len(payload)) > maxPayloadBytes {
+		return nil, "", "", NewErrPayloadTooLarge(fmt.Sprintf("COMMON-VERIFYPAYLOAD-RAWTOOLARGE payload exceeds max size of %d bytes", maxPayloadBytes))
+	}
+	if len(bytes.TrimSpace(payload)) == 0 {
+		return nil, "", "", fmt.Errorf("payload is empty")
+	}
+
+	return payload, "", headerContentType, nil
+}
+
+func verificationMaxPayloadBytesFromRequest(r *http.Request) int64 {
+	if r == nil {
+		return verifyMaxPayloadBytes
+	}
+
+	config, ok := ConfigFromContext(r.Context())
+	if !ok {
+		return verifyMaxPayloadBytes
+	}
+
+	return verificationMaxPayloadBytes(config)
+}
+
+func detectVerificationFormat(fileName string, contentType string, payload []byte) (string, error) {
+	normalizedContentType := normalizeVerificationContentType(contentType)
+	if normalizedContentType != "" {
+		switch normalizedContentType {
+		case "application/aasx+xml", "application/aasx+json", "application/asset-administration-shell+xml", "application/asset-administration-shell+json":
+			return "aasx", nil
+		case "application/json":
+			return "json", nil
+		case "application/xml", "text/xml":
+			return "xml", nil
+		default:
+			return "", fmt.Errorf("unsupported content type %q", normalizedContentType)
+		}
+	}
+
+	extension := strings.ToLower(filepath.Ext(strings.TrimSpace(fileName)))
+	switch extension {
+	case ".aasx":
+		return "aasx", nil
+	case ".json":
+		return "json", nil
+	case ".xml":
+		return "xml", nil
+	}
+
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 {
+		return "", fmt.Errorf("unable to determine format from empty payload")
+	}
+	if len(payload) >= 2 && payload[0] == 0x50 && payload[1] == 0x4b {
+		return "aasx", nil
+	}
+	if trimmed[0] == '{' || trimmed[0] == '[' {
+		return "json", nil
+	}
+	if trimmed[0] == '<' {
+		return "xml", nil
+	}
+
+	return "", fmt.Errorf("unsupported payload format")
+}
+
+func normalizeVerificationContentType(contentType string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(contentType))
+	if trimmed == "" {
+		return ""
+	}
+
+	mediaType, _, err := mime.ParseMediaType(trimmed)
+	if err != nil {
+		return ""
+	}
+
+	normalized := strings.TrimSpace(strings.ToLower(mediaType))
+	if normalized == "application/octet-stream" {
+		return ""
+	}
+
+	return normalized
+}
+
+func parseVerificationTarget(format string, payload []byte) (aastypes.IClass, error) {
+	switch format {
+	case "json":
+		return parseVerificationJSONTarget(payload)
+	case "xml":
+		return parseVerificationXMLTarget(payload)
+	case "aasx":
+		return parseVerificationAASXEnvironment(payload)
+	default:
+		return nil, fmt.Errorf("unsupported format %q", format)
+	}
+}
+
+func parseVerificationJSONTarget(payload []byte) (aastypes.IClass, error) {
+	var jsonable any
+	if err := json.Unmarshal(payload, &jsonable); err != nil {
+		return nil, err
+	}
+
+	environment, err := aasjsonization.EnvironmentFromJsonable(jsonable)
+	if err == nil {
+		return environment, nil
+	}
+
+	aas, aasErr := aasjsonization.AssetAdministrationShellFromJsonable(jsonable)
+	if aasErr == nil {
+		return aas, nil
+	}
+
+	submodel, submodelErr := aasjsonization.SubmodelFromJsonable(jsonable)
+	if submodelErr == nil {
+		return submodel, nil
+	}
+
+	conceptDescription, cdErr := aasjsonization.ConceptDescriptionFromJsonable(jsonable)
+	if cdErr == nil {
+		return conceptDescription, nil
+	}
+
+	submodelElement, smeErr := aasjsonization.SubmodelElementFromJsonable(jsonable)
+	if smeErr == nil {
+		return submodelElement, nil
+	}
+
+	return nil, fmt.Errorf("payload is neither Environment nor supported single element (AAS/Submodel/ConceptDescription/SubmodelElement)")
+}
+
+func parseVerificationXMLTarget(payload []byte) (aastypes.IClass, error) {
+	instance, err := parseVerificationXMLInstance(payload)
+	if err != nil {
+		return nil, err
+	}
+	return instance, nil
+}
+
+func parseVerificationXMLEnvironment(payload []byte) (aastypes.IEnvironment, error) {
+	target, err := parseVerificationXMLTarget(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	environment, ok := target.(aastypes.IEnvironment)
+	if !ok {
+		return nil, fmt.Errorf("XML root is %T, expected AAS Environment", target)
+	}
+
+	return environment, nil
+}
+
+func parseVerificationXMLInstance(payload []byte) (aastypes.IClass, error) {
+	instance, err := aasxmlization.Unmarshal(xml.NewDecoder(bytes.NewReader(payload)))
+	if err == nil {
+		return instance, nil
+	}
+
+	normalized := normalizeVerificationXMLContent(payload)
+	if len(normalized) == 0 || bytes.Equal(normalized, payload) {
+		return nil, err
+	}
+
+	retried, retryErr := aasxmlization.Unmarshal(xml.NewDecoder(bytes.NewReader(normalized)))
+	if retryErr == nil {
+		return retried, nil
+	}
+
+	sanitized, sanitizeErr := sanitizeVerificationXMLRootAttributes(normalized)
+	if sanitizeErr == nil && len(sanitized) > 0 {
+		sanitizedRetried, sanitizedRetryErr := aasxmlization.Unmarshal(xml.NewDecoder(bytes.NewReader(sanitized)))
+		if sanitizedRetryErr == nil {
+			return sanitizedRetried, nil
+		}
+		return nil, fmt.Errorf("%w (retry after normalization failed: %v; retry after root attribute sanitization failed: %v)", err, retryErr, sanitizedRetryErr)
+	}
+
+	if sanitizeErr != nil {
+		return nil, fmt.Errorf("%w (retry after normalization failed: %v; root attribute sanitization failed: %v)", err, retryErr, sanitizeErr)
+	}
+
+	return nil, fmt.Errorf("%w (retry after normalization failed: %v)", err, retryErr)
+}
+
+func normalizeVerificationXMLContent(payload []byte) []byte {
+	content := bytes.TrimSpace(payload)
+	content = bytes.TrimPrefix(content, []byte{0xEF, 0xBB, 0xBF})
+	content = bytes.TrimSpace(content)
+
+	start := firstVerificationXMLStartElementIndex(content)
+	if start < 0 || start >= len(content) {
+		return content
+	}
+
+	return bytes.TrimSpace(content[start:])
+}
+
+func firstVerificationXMLStartElementIndex(content []byte) int {
+	index := 0
+	for index < len(content) {
+		lt := bytes.IndexByte(content[index:], '<')
+		if lt < 0 {
+			return -1
+		}
+		candidate := index + lt
+		if candidate+1 >= len(content) {
+			return -1
+		}
+
+		next := content[candidate+1]
+		if next != '?' && next != '!' {
+			return candidate
+		}
+
+		closing := bytes.IndexByte(content[candidate:], '>')
+		if closing < 0 {
+			return -1
+		}
+		index = candidate + closing + 1
+	}
+
+	return -1
+}
+
+func sanitizeVerificationXMLRootAttributes(content []byte) ([]byte, error) {
+	decoder := xml.NewDecoder(bytes.NewReader(content))
+	var output bytes.Buffer
+	encoder := xml.NewEncoder(&output)
+	rootProcessed := false
+
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+
+		start, ok := token.(xml.StartElement)
+		if !ok || rootProcessed {
+			if encodeErr := encoder.EncodeToken(token); encodeErr != nil {
+				return nil, encodeErr
+			}
+			continue
+		}
+
+		filtered := make([]xml.Attr, 0, len(start.Attr))
+		for _, attribute := range start.Attr {
+			if attribute.Name.Space == "xmlns" || (attribute.Name.Space == "" && attribute.Name.Local == "xmlns") {
+				filtered = append(filtered, attribute)
+			}
+		}
+		start.Attr = filtered
+		if encodeErr := encoder.EncodeToken(start); encodeErr != nil {
+			return nil, encodeErr
+		}
+		rootProcessed = true
+	}
+
+	if err := encoder.Flush(); err != nil {
+		return nil, err
+	}
+
+	return output.Bytes(), nil
+}
+
+func parseVerificationAASXEnvironment(payload []byte) (aastypes.IEnvironment, error) {
+	return parseVerificationAASXEnvironmentWithLimits(bytes.NewReader(payload), AASXLimitsFromConfig(nil))
+}
+
+func parseVerificationAASXEnvironmentStream(ctx context.Context, payload io.ReadSeeker) (aastypes.IEnvironment, error) {
+	return parseVerificationAASXEnvironmentWithLimits(payload, AASXLimitsFromContext(ctx))
+}
+
+func parseVerificationAASXEnvironmentWithLimits(payload io.ReadSeeker, limits AASXLimits) (aastypes.IEnvironment, error) {
+	packaging := aasx.NewPackaging()
+	packageReader, err := packaging.OpenReadFromStream(payload, limits.ReaderOptions()...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = packageReader.Close()
+	}()
+
+	specs, err := packageReader.Specs()
+	if err != nil {
+		return nil, err
+	}
+
+	supportedSpecs := make([]*aasx.Part, 0, len(specs))
+	for _, spec := range specs {
+		if spec == nil {
+			continue
+		}
+		uri := ""
+		if spec.URI != nil {
+			uri = strings.ToLower(strings.TrimSpace(spec.URI.String()))
+		}
+		specContentType := strings.ToLower(strings.TrimSpace(spec.ContentType))
+		if strings.HasSuffix(uri, ".json") || strings.Contains(specContentType, "json") || strings.HasSuffix(uri, ".xml") || strings.Contains(specContentType, "xml") {
+			supportedSpecs = append(supportedSpecs, spec)
+		}
+	}
+
+	if len(supportedSpecs) == 0 {
+		return nil, fmt.Errorf("no supported AASX specs found")
+	}
+	if len(supportedSpecs) > 1 {
+		return nil, fmt.Errorf("multiple supported AASX specs found")
+	}
+
+	return parseVerificationAASXSpecification(supportedSpecs[0])
+}
+
+func parseVerificationAASXSpecification(spec *aasx.Part) (aastypes.IEnvironment, error) {
+	stream, err := spec.Stream()
+	if err != nil {
+		return nil, fmt.Errorf("COMMON-VERIFYAASX-OPENSPEC %w", err)
+	}
+	uri := ""
+	if spec.URI != nil {
+		uri = strings.ToLower(strings.TrimSpace(spec.URI.String()))
+	}
+	specContentType := strings.ToLower(strings.TrimSpace(spec.ContentType))
+	if strings.HasSuffix(uri, ".json") || strings.Contains(specContentType, "json") {
+		environment, parseErr := parseVerificationJSONEnvironmentReader(stream)
+		closeErr := stream.Close()
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("COMMON-VERIFYAASX-CLOSEJSONSPEC %w", closeErr)
+		}
+		return environment, nil
+	}
+
+	environment, parseErr := parseVerificationXMLEnvironmentReader(stream)
+	closeErr := stream.Close()
+	if parseErr == nil {
+		if closeErr != nil {
+			return nil, fmt.Errorf("COMMON-VERIFYAASX-CLOSEXMLSPEC %w", closeErr)
+		}
+		return environment, nil
+	}
+
+	specContent, readErr := spec.ReadAllBytes()
+	if readErr != nil {
+		return nil, fmt.Errorf("COMMON-VERIFYAASX-READXMLFALLBACK %w", readErr)
+	}
+	return parseVerificationXMLEnvironment(specContent)
+}
+
+func parseVerificationJSONEnvironmentReader(reader io.Reader) (aastypes.IEnvironment, error) {
+	var jsonable any
+	if err := json.NewDecoder(reader).Decode(&jsonable); err != nil {
+		return nil, fmt.Errorf("COMMON-VERIFYAASX-DECODEJSON %w", err)
+	}
+	environment, err := aasjsonization.EnvironmentFromJsonable(jsonable)
+	if err != nil {
+		return nil, fmt.Errorf("COMMON-VERIFYAASX-PARSEJSONENV %w", err)
+	}
+	return environment, nil
+
+}
+
+func parseVerificationXMLEnvironmentReader(reader io.Reader) (aastypes.IEnvironment, error) {
+	target, err := aasxmlization.Unmarshal(xml.NewDecoder(reader))
+	if err != nil {
+		return nil, fmt.Errorf("COMMON-VERIFYAASX-DECODEXML %w", err)
+	}
+	environment, ok := target.(aastypes.IEnvironment)
+	if !ok {
+		return nil, fmt.Errorf("COMMON-VERIFYAASX-XMLROOT root is %T, expected AAS Environment", target)
+	}
+	return environment, nil
+}
+
+func collectVerificationMessages(target aastypes.IClass) []string {
+	messages := make([]string, 0)
+	verification.Verify(target, func(verErr *verification.VerificationError) bool {
+		if verErr != nil {
+			messages = append(messages, verErr.Error())
+		}
+		return false
+	})
+	return messages
+
+}
+
+func verificationCounts(target aastypes.IClass) (int, int, int) {
+	switch value := target.(type) {
+	case aastypes.IEnvironment:
+		return len(value.AssetAdministrationShells()), len(value.Submodels()), len(value.ConceptDescriptions())
+	case aastypes.IAssetAdministrationShell:
+		return 1, 0, 0
+	case aastypes.ISubmodel:
+		return 0, 1, 0
+	case aastypes.IConceptDescription:
+		return 0, 0, 1
+	default:
+		return 0, 0, 0
+	}
 }

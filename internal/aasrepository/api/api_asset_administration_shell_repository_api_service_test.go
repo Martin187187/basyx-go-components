@@ -1,0 +1,185 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
+// Package api tests the Asset Administration Shell repository API service.
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model/grammar"
+	aasopenapi "github.com/eclipse-basyx/basyx-go-components/pkg/aasrepositoryapi/go"
+	submodelopenapi "github.com/eclipse-basyx/basyx-go-components/pkg/submodelrepositoryapi"
+	"github.com/stretchr/testify/require"
+)
+
+func contextWithABACDisabled(t *testing.T) context.Context {
+	t.Helper()
+
+	cfg := &common.Config{}
+	var cfgCtx context.Context
+	handler := common.ConfigMiddleware(cfg)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		cfgCtx = r.Context()
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+
+	require.NotNil(t, cfgCtx)
+	return cfgCtx
+}
+
+func TestGetAllAssetAdministrationShellsRejectsInvalidCursorWithStandardErrorBody(t *testing.T) {
+	t.Parallel()
+
+	invalidCursor := "%"
+	_, expectedDecodeErr := common.DecodeAPIString(invalidCursor)
+	require.Error(t, expectedDecodeErr)
+
+	sut := NewAssetAdministrationShellRepositoryAPIAPIService(t.Context(), nil, nil, false)
+	response, err := sut.GetAllAssetAdministrationShells(contextWithABACDisabled(t), nil, "", 1, invalidCursor, time.Time{}, time.Time{})
+
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, response.Code)
+
+	result, ok := response.Body.(model.Result)
+	require.True(t, ok)
+	handlers := result.Messages
+	require.Len(t, handlers, 1)
+	require.Equal(t, "Error", handlers[0].MessageType)
+	require.Equal(t, expectedDecodeErr.Error(), handlers[0].Text)
+	require.Equal(t, "400", handlers[0].Code)
+	require.Equal(t, "AASREPO-400-GetAllAssetAdministrationShells-BadRequest-BadCursor", handlers[0].CorrelationID)
+	require.NotEmpty(t, handlers[0].Timestamp)
+}
+
+func TestQueryAssetAdministrationShellsRejectsHierarchyFieldsOutsideAASEnvironment(t *testing.T) {
+	t.Parallel()
+
+	var query grammar.Query
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"$condition": {
+			"$lt": [
+				{"$numCast": {"$field": "$sme.Metrics.Value#value"}},
+				{"$numVal": 48}
+			]
+		}
+	}`), &query))
+
+	disabledService := NewAssetAdministrationShellRepositoryAPIAPIService(t.Context(), nil, nil, false)
+	response, err := disabledService.QueryAssetAdministrationShells(t.Context(), 0, "", query)
+
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, response.Code)
+	result, ok := response.Body.(model.Result)
+	require.True(t, ok)
+	handlers := result.Messages
+	require.Len(t, handlers, 1)
+	require.Contains(t, handlers[0].Text, "only supported by the AAS Environment Service")
+
+	enabledService := NewAssetAdministrationShellRepositoryAPIAPIService(t.Context(), nil, nil, true)
+	require.NoError(t, enabledService.validateAASHierarchyQuery(query))
+	enabledContext, enabledContextErr := enabledService.queryContext(t.Context(), query)
+	require.NoError(t, enabledContextErr)
+	disabledContext, disabledContextErr := disabledService.queryContext(t.Context(), grammar.Query{})
+	require.NoError(t, disabledContextErr)
+	require.True(t, grammar.AASHierarchyQueriesEnabled(enabledContext))
+	require.False(t, grammar.AASHierarchyQueriesEnabled(disabledContext))
+}
+
+func TestToAASOperationRedirectRewritesSubmodelNamespace(t *testing.T) {
+	t.Parallel()
+
+	response := model.Response(http.StatusAccepted, submodelopenapi.Redirect{
+		Location: "/submodels/c20/submodel-elements/Ops.Add/operation-status/handle-1",
+	})
+
+	translated := toAASOperationRedirect(response, "YWFz", "c20", "Ops.Add", "operation-status")
+
+	require.Equal(t, http.StatusAccepted, translated.Code)
+	redirect, ok := translated.Body.(aasopenapi.Redirect)
+	require.True(t, ok)
+	require.Equal(
+		t,
+		"/shells/YWFz/submodels/c20/submodel-elements/Ops.Add/operation-status/handle-1",
+		redirect.Location,
+	)
+}
+
+func TestToAASFileResponseWritesAttachmentContent(t *testing.T) {
+	t.Parallel()
+
+	response := toAASFileResponse(model.Response(http.StatusOK, submodelopenapi.FileDownload{
+		Content:     []byte("Read me."),
+		ContentType: "text/plain",
+		Filename:    "manual.txt",
+	}))
+
+	recorder := httptest.NewRecorder()
+	require.NoError(t, aasopenapi.EncodeJSONResponse(response.Body, &response.Code, recorder))
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "text/plain", recorder.Header().Get("Content-Type"))
+	require.Contains(t, recorder.Header().Get("Content-Disposition"), "manual.txt")
+	require.Equal(t, "Read me.", recorder.Body.String())
+}
+
+func TestToAASFileResponseWritesExternalFileRedirect(t *testing.T) {
+	t.Parallel()
+
+	response := toAASFileResponse(model.Response(http.StatusFound, submodelopenapi.Redirect{
+		Location: "https://example.com/manual.pdf",
+	}))
+
+	recorder := httptest.NewRecorder()
+	require.NoError(t, aasopenapi.EncodeJSONResponse(response.Body, &response.Code, recorder))
+
+	require.Equal(t, http.StatusFound, recorder.Code)
+	require.Equal(t, "https://example.com/manual.pdf", recorder.Header().Get("Location"))
+	require.Empty(t, recorder.Body.String())
+}
+
+func TestInvokeOperationAsyncAasRepositoryRequiresClientTimeoutDuration(t *testing.T) {
+	t.Parallel()
+
+	sut := NewAssetAdministrationShellRepositoryAPIAPIService(t.Context(), nil, nil, false)
+	response, err := sut.InvokeOperationAsyncAasRepository(contextWithABACDisabled(t), "", "", "", model.OperationRequest{})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, response.Code)
+}
+
+func TestInvokeOperationAsyncValueOnlyAasRepositoryRequiresClientTimeoutDuration(t *testing.T) {
+	t.Parallel()
+
+	sut := NewAssetAdministrationShellRepositoryAPIAPIService(t.Context(), nil, nil, false)
+	response, err := sut.InvokeOperationAsyncValueOnlyAasRepository(contextWithABACDisabled(t), "", "", "", model.OperationRequestValueOnly{})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, response.Code)
+}

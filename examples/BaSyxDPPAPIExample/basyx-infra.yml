@@ -1,0 +1,13 @@
+infrastructures:
+  default: dpp
+
+  dpp:
+    name: DPP Shared AAS Environment
+    template: mono-all
+    components:
+      aasEnvironment:
+        baseUrl: "http://localhost:8082"
+        hasRegistryIntegration: true
+        hasDiscoveryIntegration: true
+    security:
+      type: none

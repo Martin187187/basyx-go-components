@@ -1,0 +1,307 @@
+services:
+  aas-registry:
+    container_name: aas-registry
+    image: eclipsebasyx/aasregistry-go:SNAPSHOT
+    pull_policy: always
+    command: ["/app/aasregistryservice"]
+    ports:
+      - 8082:5004
+    environment:
+      - SERVER_PORT=5004
+      - SERVER_VERIFICATIONENDPOINTAVAILABLE=true
+      - CORS_ALLOWEDORIGINS=*
+      - CORS_ALLOWEDHEADERS=*
+      - CORS_ALLOWCREDENTIALS=true
+      - CORS_ALLOWEDMETHODS=GET,POST,PUT,PATCH,DELETE,OPTIONS
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=admin123
+      - POSTGRES_DBNAME=basyxTestDB
+      - POSTGRES_MAXOPENCONNECTIONS=50
+      - POSTGRES_MAXIDLECONNECTIONS=25
+      - POSTGRES_CONNMAXLIFETIMEMINUTES=5
+      - POSTGRES_CONNMAXIDLETIMEMINUTES=0
+      - ABAC_ENABLED=true
+      - ABAC_MODELPATH=/security_env/access-rules.json
+      - OIDC_TRUSTLISTPATH=/security_env/trustlist.json
+    depends_on:
+      basyx_configuration:
+        condition: service_completed_successfully
+      keycloak-healthcheck:
+        condition: service_completed_successfully
+    volumes:
+      - ./security_env:/security_env:ro
+    extra_hosts:
+      - "keycloak.localhost:host-gateway"
+    restart: unless-stopped
+
+  sm-registry:
+    container_name: sm-registry
+    image: eclipsebasyx/submodelregistry-go:SNAPSHOT
+    pull_policy: always
+    command: ["/app/submodelregistryservice"]
+    environment:
+      - SERVER_PORT=5004
+      - SERVER_VERIFICATIONENDPOINTAVAILABLE=true
+      - CORS_ALLOWEDORIGINS=*
+      - CORS_ALLOWEDHEADERS=*
+      - CORS_ALLOWCREDENTIALS=true
+      - CORS_ALLOWEDMETHODS=GET,POST,PUT,PATCH,DELETE,OPTIONS
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=admin123
+      - POSTGRES_DBNAME=basyxTestDB
+      - POSTGRES_MAXOPENCONNECTIONS=50
+      - POSTGRES_MAXIDLECONNECTIONS=25
+      - POSTGRES_CONNMAXLIFETIMEMINUTES=5
+      - POSTGRES_CONNMAXIDLETIMEMINUTES=0
+      - ABAC_ENABLED=true
+      - ABAC_MODELPATH=/security_env/access-rules.json
+      - OIDC_TRUSTLISTPATH=/security_env/trustlist.json
+    ports:
+      - 8083:5004
+    depends_on:
+      basyx_configuration:
+        condition: service_completed_successfully
+      keycloak-healthcheck:
+        condition: service_completed_successfully
+    volumes:
+      - ./security_env:/security_env:ro
+    extra_hosts:
+      - "keycloak.localhost:host-gateway"
+    restart: unless-stopped
+
+  aas-discovery:
+    container_name: aas-discovery
+    image: eclipsebasyx/aasdiscovery-go:SNAPSHOT
+    pull_policy: always
+    command: ["/app/discoveryservice"]
+    environment:
+      - SERVER_PORT=5004
+      - SERVER_VERIFICATIONENDPOINTAVAILABLE=true
+      - CORS_ALLOWEDORIGINS=*
+      - CORS_ALLOWEDHEADERS=*
+      - CORS_ALLOWCREDENTIALS=true
+      - CORS_ALLOWEDMETHODS=GET,POST,PUT,PATCH,DELETE,OPTIONS
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=admin123
+      - POSTGRES_DBNAME=basyxTestDB
+      - POSTGRES_MAXOPENCONNECTIONS=50
+      - POSTGRES_MAXIDLECONNECTIONS=25
+      - POSTGRES_CONNMAXLIFETIMEMINUTES=5
+      - POSTGRES_CONNMAXIDLETIMEMINUTES=0
+      - ABAC_ENABLED=true
+      - ABAC_MODELPATH=/security_env/access-rules.json
+      - OIDC_TRUSTLISTPATH=/security_env/trustlist.json
+    ports:
+      - "8084:5004"
+    depends_on:
+      basyx_configuration:
+        condition: service_completed_successfully
+      keycloak-healthcheck:
+        condition: service_completed_successfully
+    volumes:
+      - ./security_env:/security_env:ro
+    extra_hosts:
+      - "keycloak.localhost:host-gateway"
+    restart: unless-stopped
+
+  aas-ui:
+    container_name: aas-web-ui
+    image: eclipsebasyx/aas-gui:SNAPSHOT
+    pull_policy: always
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./basyx-infra.yml:/basyx-infra.yml:ro
+    environment:
+      - ENDPOINT_CONFIG_AVAILABLE=false
+    extra_hosts:
+      - "keycloak.localhost:host-gateway"
+    restart: unless-stopped
+
+  aas_repository:
+    container_name: aas-repository
+    image: eclipsebasyx/aasrepository-go:SNAPSHOT
+    pull_policy: always
+    command: ["/app/aasrepositoryservice"]
+    environment:
+      - SERVER_PORT=5004
+      - SERVER_VERIFICATIONENDPOINTAVAILABLE=true
+      - CORS_ALLOWEDORIGINS=*
+      - CORS_ALLOWEDHEADERS=*
+      - CORS_ALLOWCREDENTIALS=true
+      - CORS_ALLOWEDMETHODS=GET,POST,PUT,PATCH,DELETE,OPTIONS
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=admin123
+      - POSTGRES_DBNAME=basyxTestDB
+      - POSTGRES_MAXOPENCONNECTIONS=50
+      - POSTGRES_MAXIDLECONNECTIONS=25
+      - POSTGRES_CONNMAXLIFETIMEMINUTES=5
+      - POSTGRES_CONNMAXIDLETIMEMINUTES=0
+      - ABAC_ENABLED=true
+      - ABAC_MODELPATH=/security_env/access-rules.json
+      - OIDC_TRUSTLISTPATH=/security_env/trustlist.json
+    ports:
+      - "8090:5004"
+    depends_on:
+      basyx_configuration:
+        condition: service_completed_successfully
+      keycloak-healthcheck:
+        condition: service_completed_successfully
+    volumes:
+      - ./security_env:/security_env:ro
+    extra_hosts:
+      - "keycloak.localhost:host-gateway"
+    restart: unless-stopped
+
+  submodel_repository:
+    container_name: submodel-repository
+    image: eclipsebasyx/submodelrepository-go:SNAPSHOT
+    pull_policy: always
+    command: ["/app/submodelrepositoryservice"]
+    environment:
+      - SERVER_PORT=5004
+      - SERVER_VERIFICATIONENDPOINTAVAILABLE=true
+      - CORS_ALLOWEDORIGINS=*
+      - CORS_ALLOWEDHEADERS=*
+      - CORS_ALLOWCREDENTIALS=true
+      - CORS_ALLOWEDMETHODS=GET,POST,PUT,PATCH,DELETE,OPTIONS
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=admin123
+      - POSTGRES_DBNAME=basyxTestDB
+      - POSTGRES_MAXOPENCONNECTIONS=50
+      - POSTGRES_MAXIDLECONNECTIONS=25
+      - POSTGRES_CONNMAXLIFETIMEMINUTES=5
+      - POSTGRES_CONNMAXIDLETIMEMINUTES=0
+      - JWS_PRIVATEKEYPATH=/app/rsa-key.pem
+      - ABAC_ENABLED=true
+      - ABAC_MODELPATH=/security_env/access-rules.json
+      - OIDC_TRUSTLISTPATH=/security_env/trustlist.json
+    volumes:
+      - ./security_env:/security_env:ro
+      - ./basyx/rsa-key.pem:/app/rsa-key.pem:ro
+    extra_hosts:
+      - "keycloak.localhost:host-gateway"
+    ports:
+      - "8091:5004"
+    depends_on:
+      basyx_configuration:
+        condition: service_completed_successfully
+      keycloak-healthcheck:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  concept-description-repository:
+    container_name: concept-description-repository
+    image: eclipsebasyx/conceptdescriptionrepository-go:SNAPSHOT
+    pull_policy: always
+    command: ["/app/conceptdescriptionrepositoryservice"]
+    environment:
+      - SERVER_PORT=5004
+      - SERVER_VERIFICATIONENDPOINTAVAILABLE=true
+      - CORS_ALLOWEDORIGINS=*
+      - CORS_ALLOWEDHEADERS=*
+      - CORS_ALLOWCREDENTIALS=true
+      - CORS_ALLOWEDMETHODS=GET,POST,PUT,PATCH,DELETE,OPTIONS
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=admin123
+      - POSTGRES_DBNAME=basyxTestDB
+      - POSTGRES_MAXOPENCONNECTIONS=50
+      - POSTGRES_MAXIDLECONNECTIONS=25
+      - POSTGRES_CONNMAXLIFETIMEMINUTES=5
+      - POSTGRES_CONNMAXIDLETIMEMINUTES=0
+      - ABAC_ENABLED=true
+      - ABAC_MODELPATH=/security_env/access-rules.json
+      - OIDC_TRUSTLISTPATH=/security_env/trustlist.json
+    ports:
+      - "8092:5004"
+    depends_on:
+      basyx_configuration:
+        condition: service_completed_successfully
+      keycloak-healthcheck:
+        condition: service_completed_successfully
+    volumes:
+      - ./security_env:/security_env:ro
+    extra_hosts:
+      - "keycloak.localhost:host-gateway"
+    restart: unless-stopped
+
+  keycloak:
+    image: keycloak/keycloak:26.7.4
+    container_name: keycloak
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://db:5432/basyxTestDB
+      KC_DB_USERNAME: admin
+      KC_DB_PASSWORD: admin123
+      KC_HOSTNAME: keycloak.localhost
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_MANAGEMENT_ENABLED: "true"
+    command: ["start-dev", "--import-realm", "--health-enabled=true"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./keycloak/realm:/opt/keycloak/data/import:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+  keycloak-healthcheck:
+    image: curlimages/curl:latest
+    container_name: keycloak-healthcheck
+    command: >
+      sh -c "
+        echo 'Waiting for Keycloak to become ready...';
+        until curl -sf http://keycloak:9000/health/ready; do
+          sleep 5;
+        done;
+        echo 'Keycloak is ready!'"
+    depends_on:
+      - keycloak
+
+  db:
+    container_name: postgres_db
+    image: postgres:18
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+      POSTGRES_DB: basyxTestDB
+    command: ["postgres", "-c", "listen_addresses=*"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d basyxTestDB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    
+  basyx_configuration:
+    container_name: basyx_configuration
+    image: eclipsebasyx/basyxconfigurationservice-go:SNAPSHOT
+    environment:
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=admin123
+      - POSTGRES_DBNAME=basyxTestDB
+      - POSTGRES_MAXOPENCONNECTIONS=50
+      - POSTGRES_MAXIDLECONNECTIONS=25
+      - POSTGRES_CONNMAXLIFETIMEMINUTES=5
+      - POSTGRES_CONNMAXIDLETIMEMINUTES=0
+    depends_on:
+      db:
+        condition: service_healthy

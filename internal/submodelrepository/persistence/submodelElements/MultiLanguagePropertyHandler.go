@@ -1,0 +1,272 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
+// Package submodelelements provides persistence handlers for various submodel element types
+// in the Eclipse BaSyx submodel repository. It implements CRUD operations for different
+// submodel element types such as Range, Property, Collection, and others, with PostgreSQL
+// as the underlying database.
+//
+// Author: Jannik Fried ( Fraunhofer IESE )
+package submodelelements
+
+import (
+	"context"
+	"database/sql"
+
+	"github.com/FriedJannik/aas-go-sdk/types"
+	"github.com/doug-martin/goqu/v9"
+	"github.com/doug-martin/goqu/v9/exp"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	gen "github.com/eclipse-basyx/basyx-go-components/internal/common/model"
+)
+
+// PostgreSQLMultiLanguagePropertyHandler handles persistence operations for MultiLanguageProperty submodel elements.
+// It uses the decorator pattern to extend the base PostgreSQLSMECrudHandler with
+// MultiLanguageProperty-specific functionality. MultiLanguageProperty elements represent text values
+// that can be expressed in multiple languages, with each language variant stored as a separate value.
+type PostgreSQLMultiLanguagePropertyHandler struct {
+	db        *sql.DB
+	decorated *PostgreSQLSMECrudHandler
+}
+
+// NewPostgreSQLMultiLanguagePropertyHandler creates a new PostgreSQLMultiLanguagePropertyHandler instance.
+// It initializes the decorated PostgreSQLSMECrudHandler for base submodel element operations.
+//
+// Parameters:
+//   - db: A PostgreSQL database connection
+//
+// Returns:
+//   - *PostgreSQLMultiLanguagePropertyHandler: A new handler instance
+//   - error: An error if the decorated handler initialization fails
+func NewPostgreSQLMultiLanguagePropertyHandler(db *sql.DB) (*PostgreSQLMultiLanguagePropertyHandler, error) {
+	decoratedHandler, err := NewPostgreSQLSMECrudHandler(db)
+	if err != nil {
+		return nil, err
+	}
+	return &PostgreSQLMultiLanguagePropertyHandler{db: db, decorated: decoratedHandler}, nil
+}
+
+// Update modifies an existing MultiLanguageProperty submodel element in the database.
+// This method handles both the common submodel element properties and the specific
+// multi-language property data including language-text pairs and valueId reference.
+//
+// Parameters:
+//   - submodelID: ID of the parent submodel
+//   - idShortOrPath: The idShort or path identifying the element to update
+//   - submodelElement: The updated MultiLanguageProperty element data
+//   - tx: Active database transaction (can be nil, will create one if needed)
+//   - isPut: true: Replaces the element with the body data; false: Updates only passed data
+//
+// Returns:
+//   - error: An error if the update operation fails
+func (p PostgreSQLMultiLanguagePropertyHandler) Update(submodelID string, idShortOrPath string, submodelElement types.ISubmodelElement, tx *sql.Tx, isPut bool) error {
+	mlp, ok := submodelElement.(*types.MultiLanguageProperty)
+	if !ok {
+		return common.NewErrBadRequest("submodelElement is not of type MultiLanguageProperty")
+	}
+
+	var err error
+	cu, localTx, err := common.StartTXIfNeeded(tx, err, p.db)
+	if err != nil {
+		return err
+	}
+	defer cu(&err)
+	elementID, err := p.decorated.UpdateElement(submodelID, idShortOrPath, submodelElement, localTx, isPut)
+	if err != nil {
+		return err
+	}
+	dialect := goqu.Dialect("postgres")
+
+	valueIDPayload := "[]"
+	if isPut || mlp.ValueID() != nil {
+		if mlp.ValueID() != nil && !isEmptyReference(mlp.ValueID()) {
+			valueIDJSONString, serErr := serializeIClassSliceToJSON([]types.IClass{mlp.ValueID()}, "SMREPO-MLP-UPDATE-VALREFJSONIZATION")
+			if serErr != nil {
+				return serErr
+			}
+			valueIDPayload = valueIDJSONString
+		}
+	} else {
+		selectValueIDQuery, selectValueIDArgs, selectValueIDErr := dialect.From("multilanguage_property_payload").
+			Select("value_id_payload").
+			Where(goqu.C("submodel_element_id").Eq(elementID)).
+			Limit(1).
+			ToSQL()
+		if selectValueIDErr != nil {
+			return selectValueIDErr
+		}
+
+		var existingValueIDPayload []byte
+		selectErr := localTx.QueryRow(selectValueIDQuery, selectValueIDArgs...).Scan(&existingValueIDPayload)
+		if selectErr != nil && selectErr != sql.ErrNoRows {
+			return selectErr
+		}
+		if selectErr == nil && len(existingValueIDPayload) > 0 {
+			valueIDPayload = string(existingValueIDPayload)
+		}
+	}
+
+	// Handle Value field - delete existing values and insert new ones
+	// For PUT: always replace (delete all and insert new)
+	// For PATCH: only update if provided (not nil)
+	if isPut || mlp.Value() != nil {
+		deleteQuery, deleteArgs, err := dialect.Delete("multilanguage_property_value").
+			Where(goqu.C("submodel_element_id").Eq(elementID)).
+			ToSQL()
+		if err != nil {
+			return err
+		}
+
+		_, err = localTx.Exec(deleteQuery, deleteArgs...)
+		if err != nil {
+			return err
+		}
+
+		// Insert new values if provided
+		if mlp.Value() != nil {
+			for _, val := range mlp.Value() {
+				insertQuery, insertArgs, err := dialect.Insert("multilanguage_property_value").
+					Rows(goqu.Record{
+						"submodel_element_id": elementID,
+						"language":            val.Language(),
+						"text":                val.Text(),
+					}).
+					ToSQL()
+				if err != nil {
+					return err
+				}
+
+				_, err = localTx.Exec(insertQuery, insertArgs...)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	if isPut || mlp.ValueID() != nil {
+		ensurePayloadQuery, ensurePayloadArgs, ensurePayloadErr := dialect.Insert("multilanguage_property_payload").
+			Rows(goqu.Record{"submodel_element_id": elementID}).
+			OnConflict(goqu.DoNothing().SetCols(exp.NewColumnListExpression("submodel_element_id"))).
+			ToSQL()
+		if ensurePayloadErr != nil {
+			return ensurePayloadErr
+		}
+
+		_, err = localTx.Exec(ensurePayloadQuery, ensurePayloadArgs...)
+		if err != nil {
+			return err
+		}
+
+		updateMLPQuery, updateMLPArgs, updateMLPErr := dialect.Update("multilanguage_property_payload").
+			Set(goqu.Record{"value_id_payload": goqu.L("?::jsonb", valueIDPayload)}).
+			Where(goqu.C("submodel_element_id").Eq(elementID)).
+			ToSQL()
+		if updateMLPErr != nil {
+			return updateMLPErr
+		}
+
+		_, err = localTx.Exec(updateMLPQuery, updateMLPArgs...)
+		if err != nil {
+			return err
+		}
+	}
+
+	return common.CommitTransactionIfNeeded(tx, localTx)
+}
+
+// UpdateValueOnly replaces the language strings of a MultiLanguageProperty with the decoded ValueOnly value.
+func (p PostgreSQLMultiLanguagePropertyHandler) UpdateValueOnly(ctx context.Context, tx *sql.Tx, update gen.ValueOnlyUpdate) error {
+	patch, err := valueOnlyPatchAs[gen.MultiLanguagePropertyValue](update)
+	if err != nil {
+		return err
+	}
+	dialect := goqu.Dialect("postgres")
+	deleteQuery, deleteArgs, err := dialect.Delete("multilanguage_property_value").
+		Where(goqu.C("submodel_element_id").Eq(update.ElementID)).
+		Prepared(true).
+		ToSQL()
+	if err != nil {
+		return common.NewInternalServerError("SMREPO-UPDMLPVALONLY-BUILDDELETE " + err.Error())
+	}
+	if _, err = tx.ExecContext(ctx, deleteQuery, deleteArgs...); err != nil {
+		return common.NewInternalServerError("SMREPO-UPDMLPVALONLY-EXECDELETE " + err.Error())
+	}
+	return insertValueOnlyLanguageStrings(ctx, tx, dialect, update.ElementID, patch)
+}
+
+func insertValueOnlyLanguageStrings(ctx context.Context, tx *sql.Tx, dialect goqu.DialectWrapper, elementID int64, values gen.MultiLanguagePropertyValue) error {
+	rows := make([]any, 0, len(values))
+	for _, langString := range values {
+		for language, text := range langString {
+			rows = append(rows, goqu.Record{"submodel_element_id": elementID, "language": language, "text": text})
+		}
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	insertQuery, insertArgs, err := dialect.Insert("multilanguage_property_value").Rows(rows...).Prepared(true).ToSQL()
+	if err != nil {
+		return common.NewInternalServerError("SMREPO-UPDMLPVALONLY-BUILDINSERT " + err.Error())
+	}
+	if _, err = tx.ExecContext(ctx, insertQuery, insertArgs...); err != nil {
+		return common.NewInternalServerError("SMREPO-UPDMLPVALONLY-EXECINSERT " + err.Error())
+	}
+	return nil
+}
+
+// Delete removes a MultiLanguageProperty submodel element from the database.
+// Currently delegates all delete operations to the decorated handler. MultiLanguageProperty-specific data
+// (including all language values) is typically removed via database cascade constraints.
+//
+// Parameters:
+//   - idShortOrPath: The idShort or path identifying the element to delete
+//
+// Returns:
+//   - error: An error if the delete operation fails
+func (p PostgreSQLMultiLanguagePropertyHandler) Delete(idShortOrPath string) error {
+	return p.decorated.Delete(idShortOrPath)
+}
+
+// GetInsertQueryPart returns nil because MultiLanguageProperty persistence is handled
+// via batch post-processing for multilanguage_property_value and multilanguage_property_payload.
+//
+// Parameters:
+//   - tx: Active database transaction (needed for creating value references)
+//   - id: The database ID of the base submodel_element record
+//   - element: The MultiLanguageProperty element to insert
+//
+// Returns:
+//   - *InsertQueryPart: nil (no type-specific table insert required)
+//   - error: An error if the element is not of type MultiLanguageProperty
+func (p PostgreSQLMultiLanguagePropertyHandler) GetInsertQueryPart(_ *sql.Tx, id int, element types.ISubmodelElement) (*InsertQueryPart, error) {
+	mlp, ok := element.(*types.MultiLanguageProperty)
+	if !ok {
+		return nil, common.NewErrBadRequest("submodelElement is not of type MultiLanguageProperty")
+	}
+	_ = mlp
+	_ = id
+	return nil, nil
+}

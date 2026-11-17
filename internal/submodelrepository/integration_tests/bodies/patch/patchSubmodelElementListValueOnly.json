@@ -1,0 +1,12 @@
+[
+    "Updated List Item 1",
+    [
+        {
+            "en-us": "Updated List MLP"
+        }
+    ],
+    {
+        "min": 15,
+        "max": 150
+    }
+]

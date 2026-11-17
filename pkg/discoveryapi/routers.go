@@ -5,7 +5,7 @@
  *
  * The entire Submodel Repository Service Specification as part of the [Specification of the Asset Administration Shell: Part 2](http://industrialdigitaltwin.org/en/content-hub).   Publisher: Industrial Digital Twin Association (IDTA) 2023
  *
- * API version: V3.0.3_SSP-001
+ * API version: V3.2.0
  * Contact: info@idtwin.org
  */
 
@@ -14,9 +14,7 @@ package openapi
 import (
 	"encoding/json"
 	"errors"
-	"time"
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"io"
 	"mime/multipart"
@@ -25,12 +23,15 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
 )
 
 // A Route defines the parameters for an api endpoint
 type Route struct {
-	Method	  string
-	Pattern	 string
+	Method      string
+	Pattern     string
 	HandlerFunc http.HandlerFunc
 }
 
@@ -49,7 +50,6 @@ const errMsgMaxValueConstraint = "provided parameter is not respecting maximum v
 // NewRouter creates a new router for any number of api routers
 func NewRouter(routers ...Router) chi.Router {
 	router := chi.NewRouter()
-	router.Use(middleware.Logger)
 	router.Use(cors.Handler(cors.Options{}))
 	for _, api := range routers {
 		for _, route := range api.Routes() {
@@ -148,7 +148,7 @@ func readFileHeaderToTempFile(fileHeader *multipart.FileHeader) (*os.File, error
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return file, nil
 }
 
@@ -167,10 +167,7 @@ func parseTimes(param string) ([]time.Time, error) {
 
 // parseTime will parses a string parameter into a time.Time using the RFC3339 format
 func parseTime(param string) (time.Time, error) {
-	if param == "" {
-		return time.Time{}, nil
-	}
-	return time.Parse(time.RFC3339, param)
+	return common.ParseISO8601DateTime(param)
 }
 
 type Number interface {
@@ -336,7 +333,6 @@ func parseNumericArrayParameter[T Number](param, delim string, required bool, fn
 
 	return values, nil
 }
-
 
 // parseQuery parses query parameters and returns an error if any malformed value pairs are encountered.
 func parseQuery(rawQuery string) (url.Values, error) {

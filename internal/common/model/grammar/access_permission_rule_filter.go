@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -25,7 +25,16 @@
 
 // Package grammar defines the data structures for representing the AAS Access Rule Language.
 // Author: Aaron Zielstorff ( Fraunhofer IESE ), Jannik Fried ( Fraunhofer IESE )
+//
+//nolint:all
 package grammar
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+)
 
 // AccessPermissionRuleFILTER represents an optional filter component within an access permission rule.
 //
@@ -70,8 +79,51 @@ type AccessPermissionRuleFILTER struct {
 	CONDITION *LogicalExpression `json:"CONDITION,omitempty" yaml:"CONDITION,omitempty" mapstructure:"CONDITION,omitempty"`
 
 	// FRAGMENT corresponds to the JSON schema field "FRAGMENT".
-	FRAGMENT *string `json:"FRAGMENT,omitempty" yaml:"FRAGMENT,omitempty" mapstructure:"FRAGMENT,omitempty"`
+	FRAGMENT *FragmentStringPattern `json:"FRAGMENT,omitempty" yaml:"FRAGMENT,omitempty" mapstructure:"FRAGMENT,omitempty"`
+
+	// MATCH corresponds to the JSON schema field "MATCH".
+	//
+	// Optional flag controlling row-local matching behavior for fragment filters.
+	// Default is false when omitted.
+	MATCH *bool `json:"MATCH,omitempty" yaml:"MATCH,omitempty" mapstructure:"MATCH,omitempty"`
 
 	// USEFORMULA corresponds to the JSON schema field "USEFORMULA".
 	USEFORMULA *string `json:"USEFORMULA,omitempty" yaml:"USEFORMULA,omitempty" mapstructure:"USEFORMULA,omitempty"`
+}
+
+// UnmarshalJSON implements the json.Unmarshaler interface for AccessPermissionRuleFILTER.
+//
+// It enforces:
+//   - FRAGMENT is required
+//   - exactly one of CONDITION or USEFORMULA must be defined
+func (j *AccessPermissionRuleFILTER) UnmarshalJSON(value []byte) error {
+	type Plain AccessPermissionRuleFILTER
+	var plain Plain
+
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &plain); err != nil {
+		return err
+	}
+
+	isStrSet := func(p *string) bool {
+		return p != nil && strings.TrimSpace(*p) != ""
+	}
+
+	hasCondition := plain.CONDITION != nil
+	hasUseFormula := isStrSet(plain.USEFORMULA)
+
+	if plain.FRAGMENT == nil {
+		return fmt.Errorf("AccessPermissionRuleFILTER: FRAGMENT is required")
+	}
+	if err := plain.FRAGMENT.ValidateFilterTarget(); err != nil {
+		return err
+	}
+	if hasCondition == hasUseFormula {
+		if hasCondition {
+			return fmt.Errorf("AccessPermissionRuleFILTER: only one of CONDITION or USEFORMULA may be defined, not both")
+		}
+		return fmt.Errorf("AccessPermissionRuleFILTER: exactly one of CONDITION or USEFORMULA must be defined")
+	}
+
+	*j = AccessPermissionRuleFILTER(plain)
+	return nil
 }

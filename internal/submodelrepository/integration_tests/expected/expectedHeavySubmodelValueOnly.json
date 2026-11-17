@@ -1,0 +1,9 @@
+{
+    "ManufacturerName": "Fraunhofer IESE",
+    "ProductModelName": "Model X",
+    "ProductSerialNumber": {
+        "NestedCollection1": {
+            "DeepNestedProperty": 42
+        }
+    }
+}

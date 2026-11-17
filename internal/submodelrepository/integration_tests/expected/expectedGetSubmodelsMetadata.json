@@ -8,13 +8,13 @@
       "kind": "Instance",
       "modelType": "Submodel",
       "semanticId": {
-        "type": "ModelReference",
         "keys": [
           {
             "type": "Submodel",
             "value": "http://example.com/keys/123"
           }
-        ]
+        ],
+        "type": "ModelReference"
       }
     }
   ]

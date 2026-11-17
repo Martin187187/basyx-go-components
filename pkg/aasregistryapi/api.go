@@ -5,7 +5,7 @@
  *
  * The Full Profile of the Asset Administration Shell Registry Service Specification as part of the [Specification of the Asset Administration Shell: Part 2](https://industrialdigitaltwin.org/en/content-hub/aasspecifications).   Copyright: Industrial Digital Twin Association (IDTA) 2025
  *
- * API version: V3.1.1_SSP-001
+ * API version: V3.2.0
  * Contact: info@idtwin.org
  */
 
@@ -14,8 +14,10 @@ package apis
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model/grammar"
 )
 
 // AssetAdministrationShellRegistryAPIAPIRouter defines the required methods for binding the api requests to a responses for the AssetAdministrationShellRegistryAPIAPI
@@ -32,6 +34,7 @@ type AssetAdministrationShellRegistryAPIAPIRouter interface {
 	GetSubmodelDescriptorByIdThroughSuperpath(http.ResponseWriter, *http.Request)
 	PutSubmodelDescriptorByIdThroughSuperpath(http.ResponseWriter, *http.Request)
 	DeleteSubmodelDescriptorByIdThroughSuperpath(http.ResponseWriter, *http.Request)
+	QueryAssetAdministrationShellDescriptors(http.ResponseWriter, *http.Request)
 }
 
 // DescriptionAPIAPIRouter defines the required methods for binding the api requests to a responses for the DescriptionAPIAPI
@@ -46,7 +49,7 @@ type DescriptionAPIAPIRouter interface {
 // while the service implementation can be ignored with the .openapi-generator-ignore file
 // and updated with the logic required for the API.
 type AssetAdministrationShellRegistryAPIAPIServicer interface {
-	GetAllAssetAdministrationShellDescriptors(context.Context, int32, string, model.AssetKind, string) (model.ImplResponse, error)
+	GetAllAssetAdministrationShellDescriptors(context.Context, int32, string, model.AssetKind, string, []string, time.Time, time.Time) (model.ImplResponse, error)
 	PostAssetAdministrationShellDescriptor(context.Context, model.AssetAdministrationShellDescriptor) (model.ImplResponse, error)
 	GetAssetAdministrationShellDescriptorById(context.Context, string) (model.ImplResponse, error)
 	PutAssetAdministrationShellDescriptorById(context.Context, string, model.AssetAdministrationShellDescriptor) (model.ImplResponse, error)
@@ -56,6 +59,7 @@ type AssetAdministrationShellRegistryAPIAPIServicer interface {
 	GetSubmodelDescriptorByIdThroughSuperpath(context.Context, string, string) (model.ImplResponse, error)
 	PutSubmodelDescriptorByIdThroughSuperpath(context.Context, string, string, model.SubmodelDescriptor) (model.ImplResponse, error)
 	DeleteSubmodelDescriptorByIdThroughSuperpath(context.Context, string, string) (model.ImplResponse, error)
+	QueryAssetAdministrationShellDescriptors(context.Context, int32, string, grammar.Query) (model.ImplResponse, error)
 }
 
 // DescriptionAPIAPIServicer defines the api actions for the DescriptionAPIAPI service

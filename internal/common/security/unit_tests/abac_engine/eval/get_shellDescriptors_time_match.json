@@ -1,0 +1,12 @@
+{
+  "method": "GET",
+  "path": "/shell-descriptors",
+  "claims": {
+    "role": "viewer",
+    "CLIENTNOW": "2025-01-01T00:00:00Z"
+  },
+  "globals": {
+    "UTCNOW": "2025-01-01T00:00:00Z",
+    "LOCALNOW": "2025-01-01T01:00:00+01:00"
+  }
+}

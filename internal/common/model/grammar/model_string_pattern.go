@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -25,13 +25,33 @@
 
 // Package grammar defines the data structures for representing model string patterns in the grammar model.
 // Author: Aaron Zielstorff ( Fraunhofer IESE ), Jannik Fried ( Fraunhofer IESE )
+//
+//nolint:all
 package grammar
 
 import (
-	"encoding/json"
 	"fmt"
 	"regexp"
+
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
 )
+
+const specificAssetIDValuePattern = `specificAssetIds` + arrayIndexPattern + `\.(?:name|value|externalSubjectId(?:\.(?:type|keys` + arrayIndexPattern + `\.(?:type|value)))?)`
+const submodelReferenceValuePattern = `submodels` + arrayIndexPattern + `\.(?:type|keys` + arrayIndexPattern + `\.(?:type|value))`
+const endpointValuePattern = `endpoints` + arrayIndexPattern + `\.(?:interface|protocolinformation\.href)`
+const submodelDescriptorValuePattern = `submodelDescriptors` + arrayIndexPattern + `\.(?:` + semanticIDValuePattern + `|` + supplementalSemanticIDValuePattern + `|idShort|id|` + endpointValuePattern + `)`
+
+const pattern = `^(?:` +
+	`\$aas#(?:idShort|id|assetInformation\.assetKind|assetInformation\.assetType|assetInformation\.globalAssetId|assetInformation\.` + specificAssetIDValuePattern + `|` + submodelReferenceValuePattern + `)|` +
+	`\$sm#(?:` + semanticIDValuePattern + `|` + supplementalSemanticIDValuePattern + `|idShort|id)|` +
+	`\$sme(?:\.` + idShortPathPattern + `)?#(?:` + semanticIDValuePattern + `|` + supplementalSemanticIDValuePattern + `|idShort|value|valueType|language)|` +
+	`\$cd#(?:idShort|id)|` +
+	`\$aasdesc#(?:idShort|id|assetKind|assetType|globalAssetId|createdAt|` + specificAssetIDValuePattern + `|` + endpointValuePattern + `|` + submodelDescriptorValuePattern + `)|` +
+	`\$smdesc#(?:` + semanticIDValuePattern + `|` + supplementalSemanticIDValuePattern + `|idShort|id|createdAt|` + endpointValuePattern + `)|` +
+	`\$bd#(?:globalAssetId|createdAt|` + specificAssetIDValuePattern + `)` +
+	`)$`
+
+var modelPatternRegex = regexp.MustCompile(pattern)
 
 // ModelStringPattern represents a string pattern for model references in the AAS grammar.
 //
@@ -47,12 +67,14 @@ import (
 //   - $cd#       : Concept Description references
 //   - $aasdesc#  : AAS Descriptor references
 //   - $smdesc#   : Submodel Descriptor references
+//   - $bd#       : Basic Discovery references
 //
 // Examples:
 //   - "$aas#idShort"
 //   - "$sm#semanticId.keys[0].value"
 //   - "$sme.property1#value"
 //   - "$aasdesc#endpoints[0].interface"
+//   - "$bd#specificAssetIds[0].name"
 type ModelStringPattern string
 
 // UnmarshalJSON implements the json.Unmarshaler interface for ModelStringPattern.
@@ -70,11 +92,13 @@ type ModelStringPattern string
 func (j *ModelStringPattern) UnmarshalJSON(value []byte) error {
 	type Plain ModelStringPattern
 	var plain Plain
-	if err := json.Unmarshal(value, &plain); err != nil {
+
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &plain); err != nil {
 		return err
 	}
-	if matched, _ := regexp.MatchString(`^(?:\$aas#(?:idShort|id|assetInformation\.assetKind|assetInformation\.assetType|assetInformation\.globalAssetId|assetInformation\.(?:specificAssetIds\[[0-9]*\](?:\.(?:name|value|externalSubjectId(?:\.type|\.keys\[\d*\](?:\.(?:type|value))?)?)?)|submodels\.(?:type|keys\[\d*\](?:\.(?:type|value))?))|submodels\.(type|keys\[\d*\](?:\.(type|value))?))|(?:\$sm#(?:semanticId(?:\.type|\.keys\[\d*\](?:\.(type|value))?)?|idShort|id))|(?:\$sme(?:\.[a-zA-Z][a-zA-Z0-9_]*\[[0-9]*\]?(?:\.[a-zA-Z][a-zA-Z0-9_]*\[[0-9]*\]?)*)?#(?:semanticId(?:\.type|\.keys\[\d*\](?:\.(type|value))?)?|idShort|value|valueType|language))|(?:\$cd#(?:idShort|id)))|(?:\$aasdesc#(?:idShort|id|assetKind|assetType|globalAssetId|specificAssetIds\[[0-9]*\]?(?:\.(name|value|externalSubjectId(?:\.type|\.keys\[\d*\](?:\.(type|value))?)?)?)|endpoints\[[0-9]*\]\.(interface|protocolinformation\.href)|submodelDescriptors\[[0-9]*\]\.(semanticId(?:\.type|\.keys\[\d*\](?:\.(type|value))?)?|idShort|id|endpoints\[[0-9]*\]\.(interface|protocolinformation\.href))))|(?:\$smdesc#(?:semanticId(?:\.type|\.keys\[\d*\](?:\.(type|value))?)?|idShort|id|endpoints\[[0-9]*\]\.(interface|protocolinformation\.href)))$`, string(plain)); !matched {
-		return fmt.Errorf("field %s pattern match: must match %s", "", `^(?:\$aas#(?:idShort|id|assetInformation\.assetKind|assetInformation\.assetType|assetInformation\.globalAssetId|assetInformation\.(?:specificAssetIds\[[0-9]*\](?:\.(?:name|value|externalSubjectId(?:\.type|\.keys\[\d*\](?:\.(?:type|value))?)?)?)|submodels\.(?:type|keys\[\d*\](?:\.(?:type|value))?))|submodels\.(type|keys\[\d*\](?:\.(type|value))?))|(?:\$sm#(?:semanticId(?:\.type|\.keys\[\d*\](?:\.(type|value))?)?|idShort|id))|(?:\$sme(?:\.[a-zA-Z][a-zA-Z0-9_]*\[[0-9]*\]?(?:\.[a-zA-Z][a-zA-Z0-9_]*\[[0-9]*\]?)*)?#(?:semanticId(?:\.type|\.keys\[\d*\](?:\.(type|value))?)?|idShort|value|valueType|language))|(?:\$cd#(?:idShort|id)))|(?:\$aasdesc#(?:idShort|id|assetKind|assetType|globalAssetId|specificAssetIds\[[0-9]*\]?(?:\.(name|value|externalSubjectId(?:\.type|\.keys\[\d*\](?:\.(type|value))?)?)?)|endpoints\[[0-9]*\]\.(interface|protocolinformation\.href)|submodelDescriptors\[[0-9]*\]\.(semanticId(?:\.type|\.keys\[\d*\](?:\.(type|value))?)?|idShort|id|endpoints\[[0-9]*\]\.(interface|protocolinformation\.href))))|(?:\$smdesc#(?:semanticId(?:\.type|\.keys\[\d*\](?:\.(type|value))?)?|idShort|id|endpoints\[[0-9]*\]\.(interface|protocolinformation\.href)))$`)
+	if !modelPatternRegex.MatchString(string(plain)) {
+
+		return fmt.Errorf("field %s pattern match: must match %s", "", pattern)
 	}
 	*j = ModelStringPattern(plain)
 	return nil

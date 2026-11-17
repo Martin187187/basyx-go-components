@@ -1,49 +1,64 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
 /*
  * DotAAS Part 2 | HTTP/REST | Submodel Repository Service Specification
  *
- * The entire Submodel Repository Service Specification as part of the [Specification of the Asset Administration Shell: Part 2](http://industrialdigitaltwin.org/en/content-hub).   Publisher: Industrial Digital Twin Association (IDTA) 2023
+ * The entire Submodel Repository Service Specification as part of the [Specification of the Asset Administration Shell: Part 2](https://industrialdigitaltwin.org/en/content-hub/aasspecifications).   Copyright: Industrial Digital Twin Association (IDTA) 2025
  *
- * API version: V3.0.3_SSP-001
+ * API version: V3.2.0
  * Contact: info@idtwin.org
  */
-
+//nolint:all
 package model
+
+import (
+	"encoding/json"
+
+	"github.com/FriedJannik/aas-go-sdk/types"
+)
 
 // RelationshipElementValue A relationship element value consisting of two reference values.
 type RelationshipElementValue struct {
-	First ReferenceValue `json:"first"`
+	First map[string]any `json:"first,omitempty"`
 
-	Second ReferenceValue `json:"second"`
+	Second map[string]any `json:"second,omitempty"`
 }
 
-// AssertRelationshipElementValueRequired checks if the required fields are not zero-ed
-func AssertRelationshipElementValueRequired(obj RelationshipElementValue) error {
-	elements := map[string]interface{}{
-		"first":  obj.First,
-		"second": obj.Second,
-	}
-	for name, el := range elements {
-		if isZero := IsZeroValue(el); isZero {
-			return &RequiredError{Field: name}
-		}
-	}
-
-	if err := AssertReferenceValueRequired(obj.First); err != nil {
-		return err
-	}
-	if err := AssertReferenceValueRequired(obj.Second); err != nil {
-		return err
-	}
-	return nil
+// MarshalValueOnly serializes RelationshipElementValue in Value-Only format
+func (r RelationshipElementValue) MarshalValueOnly() ([]byte, error) {
+	type Alias RelationshipElementValue
+	return json.Marshal((Alias)(r))
 }
 
-// AssertRelationshipElementValueConstraints checks if the values respects the defined constraints
-func AssertRelationshipElementValueConstraints(obj RelationshipElementValue) error {
-	if err := AssertReferenceValueConstraints(obj.First); err != nil {
-		return err
-	}
-	if err := AssertReferenceValueConstraints(obj.Second); err != nil {
-		return err
-	}
-	return nil
+// MarshalJSON implements custom JSON marshaling for RelationshipElementValue
+func (r RelationshipElementValue) MarshalJSON() ([]byte, error) {
+	return r.MarshalValueOnly()
+}
+
+// GetModelType returns the model type name for RelationshipElement
+func (r RelationshipElementValue) GetModelType() types.ModelType {
+	return types.ModelTypeRelationshipElement
 }

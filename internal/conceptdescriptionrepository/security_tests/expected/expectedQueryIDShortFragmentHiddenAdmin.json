@@ -1,0 +1,18 @@
+{
+  "paging_metadata": {},
+  "result": [
+    {
+      "administration": {
+        "createdAt": "2030-01-02T03:04:05Z",
+        "updatedAt": "2030-01-02T03:04:06Z"
+      },
+      "id": "urn:example:cd:viewer:allowed",
+      "modelType": "ConceptDescription"
+    },
+    {
+      "id": "urn:example:cd:viewer:hidden",
+      "idShort": "ViewerHidden",
+      "modelType": "ConceptDescription"
+    }
+  ]
+}

@@ -1,8 +1,11 @@
-# Stage 1: Build the application
-FROM golang:1.25-alpine AS builder
+# syntax=docker/dockerfile:1
 
-# Version argument for build-time injection
-ARG VERSION=dev
+# Stage 1: Build the application
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETVARIANT
 
 # Install git and SSL certificates for package downloads
 RUN apk update && apk add --no-cache git ca-certificates && update-ca-certificates
@@ -14,48 +17,46 @@ WORKDIR /app
 COPY go.mod go.sum ./
 
 # Download dependencies
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
-# Copy the entire project
-COPY . .
+COPY cmd/submodelrepositoryservice ./cmd/submodelrepositoryservice
+COPY internal ./internal
+COPY pkg ./pkg
 
-# Build the application with version information
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
-    -ldflags "-X main.Version=${VERSION} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+# Build the application
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOARM=${TARGETVARIANT#v} go build -trimpath \
     -o submodelrepositoryservice ./cmd/submodelrepositoryservice
 
-# Stage 2: Create a minimal image to run the application
-FROM alpine:latest
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOARM=${TARGETVARIANT#v} go build -trimpath \
+    -o healthprobe ./internal/healthprobe
 
-# Install certificates and tools for HTTPS and health checks
-RUN apk --no-cache add ca-certificates wget
+# Stage 2: Distroless runtime image
+FROM gcr.io/distroless/static:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931
 
-WORKDIR /root/
+WORKDIR /app
 
-# Copy the binary from the builder stage
-COPY --from=builder /app/submodelrepositoryservice .
-
-# Create a directory for configuration
-RUN mkdir -p /config
-
-# Copy default configuration
+# Copy runtime artifacts
+COPY --from=builder /app/submodelrepositoryservice /app/submodelrepositoryservice
 COPY --from=builder /app/cmd/submodelrepositoryservice/config.yaml /config/config.yaml
-COPY --from=builder /app/basyxschema.sql /root/basyxschema.sql
+
+COPY --from=builder /app/healthprobe /bin/healthprobe
+COPY --from=builder /app/healthprobe /bin/wget
 
 # Default port (can be overridden by environment)
 ENV SERVER_PORT=5000
-
-# Create a healthcheck script
-COPY --from=builder /app/cmd/submodelrepositoryservice/healthcheck.sh /root/healthcheck.sh
-RUN chmod +x /root/healthcheck.sh
 
 # Expose the service port (this is just documentation, the actual port is determined by the environment)
 EXPOSE ${SERVER_PORT}
 
 # Command to run the application
 # Use environment variables or mount a custom config file to /config/config.yaml
-CMD ["./submodelrepositoryservice", "-config", "/config/config.yaml", "-databaseSchema", "basyxschema.sql"]
+CMD ["/app/submodelrepositoryservice", "-config", "/config/config.yaml"]
 
-# Health check using the script
+# Health check runs via healthprobe
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD /root/healthcheck.sh
+    CMD ["/bin/healthprobe"]

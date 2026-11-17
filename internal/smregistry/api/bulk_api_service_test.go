@@ -1,0 +1,206 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+// Author: Aaron Zielstorff ( Fraunhofer IESE )
+
+package smregistryapi
+
+import (
+	"context"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/asyncjob"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
+	auth "github.com/eclipse-basyx/basyx-go-components/internal/common/security"
+	"github.com/stretchr/testify/require"
+)
+
+type smBulkServiceStub struct {
+	createResult asyncjob.BulkResult
+	putResult    asyncjob.BulkResult
+	deleteResult asyncjob.BulkResult
+}
+
+func (s smBulkServiceStub) ExecuteBulkCreateAtomic(_ context.Context, _ []model.SubmodelDescriptor) asyncjob.BulkResult {
+	return s.createResult
+}
+
+func (s smBulkServiceStub) ExecuteBulkPutAtomic(_ context.Context, _ []model.SubmodelDescriptor) asyncjob.BulkResult {
+	return s.putResult
+}
+
+func (s smBulkServiceStub) ExecuteBulkDeleteAtomic(_ context.Context, _ []string) asyncjob.BulkResult {
+	return s.deleteResult
+}
+
+func TestBulkServiceResultLifecycle(t *testing.T) {
+	manager := asyncjob.NewManager("SMR-BULK-TEST", time.Minute)
+	service := NewBulkService(smBulkServiceStub{}, manager)
+	handleID, err := manager.Start(t.Context(), "anonymous", asyncjob.StartOptions{JobKind: "test"})
+	require.NoError(t, err)
+
+	running := service.GetResult(context.Background(), handleID)
+	require.Equal(t, http.StatusBadRequest, running.Code)
+	runningMessages := running.Body.(model.Result).Messages
+	require.Contains(t, runningMessages[0].CorrelationID, "-GetBulkAsyncResult-BadRequest-OperationStillRunning")
+
+	require.NoError(t, manager.Complete(t.Context(), handleID, asyncjob.SuccessfulAtomicResult()))
+
+	found := service.GetStatus(context.Background(), handleID)
+	require.Equal(t, http.StatusFound, found.Code)
+
+	success := service.GetResult(context.Background(), handleID)
+	require.Equal(t, http.StatusNoContent, success.Code)
+
+	notFound := service.GetResult(context.Background(), handleID)
+	require.Equal(t, http.StatusNotFound, notFound.Code)
+	notFoundMessages := notFound.Body.(model.Result).Messages
+	require.Contains(t, notFoundMessages[0].CorrelationID, "-GetBulkAsyncResult-NotFound-HandleNotFound")
+}
+
+func TestBulkServiceResultIsOwnerScoped(t *testing.T) {
+	manager := asyncjob.NewManager("SMR-BULK-TEST", time.Minute)
+	service := NewBulkService(smBulkServiceStub{}, manager)
+
+	ownerCtx := withClaims(context.Background(), auth.Claims{"sub": "owner-a", "iss": "issuer-a"})
+	otherCtx := withClaims(context.Background(), auth.Claims{"sub": "owner-b", "iss": "issuer-a"})
+
+	start := service.StartDelete(ownerCtx, []string{"urn:ok"})
+	require.Equal(t, http.StatusAccepted, start.Code)
+	handleID := extractSMHandleID(t, start)
+
+	require.Equal(t, http.StatusNotFound, service.GetResult(otherCtx, handleID).Code)
+}
+
+func TestBulkServiceStatusIsOwnerScoped(t *testing.T) {
+	manager := asyncjob.NewManager("SMR-BULK-TEST", time.Minute)
+	service := NewBulkService(smBulkServiceStub{}, manager)
+
+	ownerCtx := withClaims(context.Background(), auth.Claims{"sub": "owner-a", "iss": "issuer-a"})
+	otherCtx := withClaims(context.Background(), auth.Claims{"sub": "owner-b", "iss": "issuer-a"})
+
+	start := service.StartCreate(ownerCtx, []model.SubmodelDescriptor{{Id: "urn:ok"}})
+	require.Equal(t, http.StatusAccepted, start.Code)
+	handleID := extractSMHandleID(t, start)
+
+	require.Equal(t, http.StatusNotFound, service.GetStatus(otherCtx, handleID).Code)
+}
+
+func TestBulkServiceUnknownHandleReturnsNotFound(t *testing.T) {
+	manager := asyncjob.NewManager("SMR-BULK-TEST", time.Minute)
+	service := NewBulkService(smBulkServiceStub{}, manager)
+
+	status := service.GetStatus(context.Background(), "SMR-BULK-TEST-unknown")
+	require.Equal(t, http.StatusNotFound, status.Code)
+	statusMessages := status.Body.(model.Result).Messages
+	require.Contains(t, statusMessages[0].CorrelationID, "-GetBulkAsyncStatus-NotFound-HandleNotFound")
+	require.Equal(t, http.StatusNotFound, service.GetResult(context.Background(), "SMR-BULK-TEST-unknown").Code)
+}
+
+func TestBulkServiceRejectsStartWhenExecutionCapacityIsExhausted(t *testing.T) {
+	manager := asyncjob.NewManager("SMR-BULK-TEST", time.Minute)
+	service := NewBulkService(smBulkServiceStub{}, manager)
+	releases := exhaustExecutionSlots(t, manager)
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+
+	response := service.StartCreate(context.Background(), []model.SubmodelDescriptor{{Id: "urn:ok"}})
+	require.Equal(t, http.StatusTooManyRequests, response.Code)
+}
+
+func TestBulkServiceDeleteFailureResult(t *testing.T) {
+	manager := asyncjob.NewManager("SMR-BULK-TEST", time.Minute)
+	service := NewBulkService(smBulkServiceStub{
+		deleteResult: asyncjob.BulkResult{
+			Failures: []asyncjob.ItemFailure{
+				{Index: 1, Identifier: "urn:bad", StatusCode: http.StatusNotFound, Message: "not found"},
+			},
+		},
+	}, manager)
+
+	start := service.StartDelete(context.Background(), []string{"urn:ok", "urn:bad"})
+	require.Equal(t, http.StatusAccepted, start.Code)
+	handleID := extractSMHandleID(t, start)
+	awaitSMResultAvailability(t, service, handleID)
+
+	result := service.GetResult(context.Background(), handleID)
+	require.Equal(t, http.StatusBadRequest, result.Code)
+
+	body, ok := result.Body.(model.Result)
+	require.True(t, ok)
+	require.Len(t, body.Messages, 1)
+	require.Equal(t, "Error", body.Messages[0].MessageType)
+	require.Equal(t, "404", body.Messages[0].Code)
+	require.Equal(t, "bulk-item-1", body.Messages[0].CorrelationID)
+	require.Equal(t, "item[1] (urn:bad): not found", body.Messages[0].Text)
+}
+
+func awaitSMResultAvailability(t *testing.T, service *BulkService, handleID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status := service.GetStatus(context.Background(), handleID)
+		if status.Code == http.StatusFound {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("SMR-BULK-TEST-TIMEOUT %s", handleID)
+}
+
+func extractSMHandleID(t *testing.T, response model.ImplResponse) string {
+	t.Helper()
+
+	redirect, ok := response.Body.(model.Redirect)
+	require.True(t, ok)
+	handleID := redirect.Location[strings.LastIndex(redirect.Location, "/")+1:]
+	require.NotEmpty(t, handleID)
+	return handleID
+}
+
+func withClaims(ctx context.Context, claims auth.Claims) context.Context {
+	if ctx == nil {
+		ctx = context.TODO()
+	}
+
+	return context.WithValue(ctx, auth.ClaimsKey, claims)
+}
+
+func exhaustExecutionSlots(t *testing.T, manager *asyncjob.Manager) []func() {
+	t.Helper()
+	releases := make([]func(), 0)
+	for {
+		release, acquired := manager.TryAcquireExecutionSlot()
+		if !acquired {
+			return releases
+		}
+		releases = append(releases, release)
+	}
+}

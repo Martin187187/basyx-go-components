@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -28,9 +28,11 @@
 package builder
 
 import (
-	"log"
+	"log/slog"
 
-	gen "github.com/eclipse-basyx/basyx-go-components/internal/common/model"
+	"github.com/FriedJannik/aas-go-sdk/jsonization"
+	"github.com/FriedJannik/aas-go-sdk/types"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
 	jsoniter "github.com/json-iterator/go"
 )
 
@@ -46,7 +48,7 @@ import (
 //     version information, creator references, and embedded data specifications
 //
 // Returns:
-//   - *gen.AdministrativeInformation: A pointer to the constructed administrative information object
+//   - *model.AdministrativeInformation: A pointer to the constructed administrative information object
 //     with all nested references and data specifications properly built
 //   - error: An error if reference parsing fails, nil otherwise. Note that errors during embedded
 //     data specification building are logged but do not cause the function to fail
@@ -55,38 +57,56 @@ import (
 //
 //	admin, err := BuildAdministration(adminRow)
 //	if err != nil {
-//	    log.Printf("Failed to build administration: %v", err)
+//	    return err
 //	}
-func BuildAdministration(adminRow AdministrationRow) (*gen.AdministrativeInformation, error) {
-	administration := &gen.AdministrativeInformation{
-		Version:    adminRow.Version,
-		Revision:   adminRow.Revision,
-		TemplateID: adminRow.TemplateID,
+func BuildAdministration(adminRow model.AdministrationRow) (*types.AdministrativeInformation, error) {
+	administration := &types.AdministrativeInformation{}
+	if adminRow.Version != "" {
+		administration.SetVersion(&adminRow.Version)
+	}
+	if adminRow.Revision != "" {
+		administration.SetRevision(&adminRow.Revision)
+	}
+	if adminRow.TemplateID != "" {
+		administration.SetTemplateID(&adminRow.TemplateID)
 	}
 
 	refBuilderMap := make(map[int64]*ReferenceBuilder)
 
-	refs, err := ParseReferences(adminRow.Creator, refBuilderMap)
+	refs, err := ParseReferences(adminRow.Creator, refBuilderMap, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	if err = ParseReferredReferences(adminRow.CreatorReferred, refBuilderMap); err != nil {
+	if err = ParseReferredReferences(adminRow.CreatorReferred, refBuilderMap, nil); err != nil {
 		return nil, err
 	}
 
 	if len(refs) > 0 {
-		administration.Creator = refs[0]
+		administration.SetCreator(refs[0])
 	}
 
 	if adminRow.EmbeddedDataSpecification != nil {
-		var edsList []gen.EmbeddedDataSpecification
+		var edsList []types.IEmbeddedDataSpecification
 		var json = jsoniter.ConfigCompatibleWithStandardLibrary
-		err := json.Unmarshal(adminRow.EmbeddedDataSpecification, &edsList)
+		var jsonable []map[string]any
+		err := json.Unmarshal(adminRow.EmbeddedDataSpecification, &jsonable)
 		if err != nil {
-			log.Printf("Failed to build embedded data specifications: %v", err)
+			slog.Error("Failed to unmarshal embedded data specifications", "error.code", "BUILDER-BUILDADMINISTRATION-UNMARSHAL", "error", err)
 		} else {
-			administration.EmbeddedDataSpecifications = edsList
+			for _, obj := range jsonable {
+				eds, err := jsonization.EmbeddedDataSpecificationFromJsonable(obj)
+				if err != nil {
+					slog.Error("Failed to convert jsonable to EmbeddedDataSpecification", "error.code", "BUILDER-BUILDADMINISTRATION-EXECUTE", "error", err)
+					continue
+				}
+				edsList = append(edsList, eds)
+			}
+		}
+		if err != nil {
+			slog.Error("Failed to build embedded data specifications", "error.code", "BUILDER-BUILDADMINISTRATION-EXECUTE", "error", err)
+		} else {
+			administration.SetEmbeddedDataSpecifications(edsList)
 		}
 	}
 

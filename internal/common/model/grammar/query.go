@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -25,17 +25,93 @@
 
 // Package grammar defines the data structures for representing queries in the grammar model.
 // Author: Aaron Zielstorff ( Fraunhofer IESE ), Jannik Fried ( Fraunhofer IESE )
+//
+//nolint:all
 package grammar
 
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
 )
+
+type SubFilter struct {
+	// CONDITION corresponds to the JSON schema field "CONDITION".
+	Condition *LogicalExpression `json:"$condition,omitempty" yaml:"$condition,omitempty" mapstructure:"$condition,omitempty"`
+
+	// FRAGMENT corresponds to the JSON schema field "FRAGMENT".
+	Fragment *FragmentStringPattern `json:"$fragment,omitempty" yaml:"$fragment,omitempty" mapstructure:"$fragment,omitempty"`
+
+	// Match enables row-local evaluation for the selected fragment.
+	Match *bool `json:"$match,omitempty" yaml:"$match,omitempty" mapstructure:"$match,omitempty"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler for SubFilter.
+func (j *SubFilter) UnmarshalJSON(value []byte) error {
+	type Plain SubFilter
+	var plain Plain
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &plain); err != nil {
+		return err
+	}
+	if plain.Condition == nil {
+		return fmt.Errorf("SubFilter: $condition is required")
+	}
+	if plain.Fragment == nil {
+		return fmt.Errorf("SubFilter: $fragment is required")
+	}
+	if err := plain.Fragment.ValidateFilterTarget(); err != nil {
+		return err
+	}
+	*j = SubFilter(plain)
+	return nil
+}
 
 // Query represents a query structure with a condition field
 type Query struct {
-	// Condition corresponds to the JSON schema field "$condition".
+	// Condition corresponds to the JSON schema field "$cmondition".
 	Condition *LogicalExpression `json:"$condition,omitempty" yaml:"$condition,omitempty" mapstructure:"$condition,omitempty"`
+
+	FilterConditions []SubFilter `json:"$filters,omitempty" yaml:"$filters,omitempty" mapstructure:"$filters,omitempty"`
+
+	Select SelectStatement `json:"$select,omitempty" yaml:"$select,omitempty" mapstructure:"$select,omitempty"`
+}
+
+// SelectStatement is the optional $select statement of the AAS Query Language.
+type SelectStatement string
+
+// SelectIdentifiers is the only $select statement defined by the AAS Query
+// Language. It returns the identifiers of the matching objects.
+const SelectIdentifiers SelectStatement = "id"
+
+// UnmarshalJSON accepts only the string "id" as defined by the Query schema.
+func (j *SelectStatement) UnmarshalJSON(value []byte) error {
+	var raw string
+	if err := json.Unmarshal(value, &raw); err != nil || SelectStatement(raw) != SelectIdentifiers {
+		return fmt.Errorf("Query: $select must be the string %q", SelectIdentifiers)
+	}
+	*j = SelectIdentifiers
+	return nil
+}
+
+// SelectsIdentifiers reports whether the query requests identifiers instead of objects.
+func (j Query) SelectsIdentifiers() bool {
+	return j.Select == SelectIdentifiers
+}
+
+// UnmarshalJSON bounds query complexity before recursively decoding its expressions.
+func (j *Query) UnmarshalJSON(value []byte) error {
+	if err := validateExpressionJSONComplexity(value); err != nil {
+		return err
+	}
+	type Plain Query
+	var plain Plain
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &plain); err != nil {
+		return err
+	}
+	*j = Query(plain)
+	return nil
 }
 
 // QueryWrapper wraps a Query object
@@ -46,8 +122,8 @@ type QueryWrapper struct {
 
 // UnmarshalJSON implements json.Unmarshaler for QueryWrapper.
 func (j *QueryWrapper) UnmarshalJSON(value []byte) error {
-	var raw map[string]interface{}
-	if err := json.Unmarshal(value, &raw); err != nil {
+	var raw map[string]any
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &raw); err != nil {
 		return err
 	}
 	if _, ok := raw["Query"]; raw != nil && !ok {
@@ -55,9 +131,52 @@ func (j *QueryWrapper) UnmarshalJSON(value []byte) error {
 	}
 	type Plain QueryWrapper
 	var plain Plain
-	if err := json.Unmarshal(value, &plain); err != nil {
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &plain); err != nil {
 		return err
 	}
 	*j = QueryWrapper(plain)
+	return nil
+}
+
+// AssertQueryRequired checks if the required fields are not zero-ed
+func AssertQueryRequired(obj Query) error {
+	elements := map[string]any{
+		"$condition": obj.Condition,
+	}
+	for name, el := range elements {
+		if isZero := model.IsZeroValue(el); isZero {
+			return &model.RequiredError{Field: name}
+		}
+	}
+
+	if obj.Condition != nil {
+		if err := AssertLogicalExpressionRequired(*obj.Condition); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.FilterConditions {
+		if el.Condition != nil {
+			if err := AssertLogicalExpressionRequired(*el.Condition); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// AssertQueryConstraints checks if the values respects the defined constraints
+func AssertQueryConstraints(obj Query) error {
+	if obj.Condition != nil {
+		if err := AssertLogicalExpressionConstraints(*obj.Condition); err != nil {
+			return err
+		}
+	}
+	for _, el := range obj.FilterConditions {
+		if el.Condition != nil {
+			if err := AssertLogicalExpressionConstraints(*el.Condition); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }

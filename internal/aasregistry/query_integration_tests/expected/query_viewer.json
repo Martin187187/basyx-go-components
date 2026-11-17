@@ -1,0 +1,63 @@
+{
+  "paging_metadata": {},
+  "result": [
+    {
+      "id": "https://example.org/B",
+      "endpoints": [
+        {
+          "protocolInformation": {
+            "href": "hrefB",
+            "endpointProtocol": "http"
+          },
+          "interface": "AAS-3.0"
+        }
+      ],
+      "extensions": [
+        {
+          "name": "help",
+          "valueType": "xs:string",
+          "value": "test"
+        }
+      ],
+      "submodelDescriptors": [
+        {
+          "id": "https://example.org/B/SM",
+          "endpoints": [
+            {
+              "interface": "SUBMODEL-3.0",
+              "protocolInformation": {
+                "href": "https://example.org/B/SM"
+              }
+            }
+          ],
+          "supplementalSemanticIds": [
+            {
+              "type": "ExternalReference",
+              "keys": [
+                {
+                  "type": "GlobalReference",
+                  "value": "FILTER_VISIBLE"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "specificAssetIds": [
+        {
+          "name": "customerPartId",
+          "value": "39480543",
+          "externalSubjectId": {
+            "type": "ExternalReference",
+            "keys": [
+              {
+                "type": "GlobalReference",
+                "value": "WRITTEN_BY_Y"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

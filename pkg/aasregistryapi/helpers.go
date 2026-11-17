@@ -5,13 +5,14 @@
  *
  * The Full Profile of the Asset Administration Shell Registry Service Specification as part of the [Specification of the Asset Administration Shell: Part 2](https://industrialdigitaltwin.org/en/content-hub/aasspecifications).   Copyright: Industrial Digital Twin Association (IDTA) 2025
  *
- * API version: V3.1.1_SSP-001
+ * API version: V3.2.0
  * Contact: info@idtwin.org
  */
 
 package apis
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
 	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
 )
 
@@ -183,10 +185,7 @@ func parseTimes(param string) ([]time.Time, error) {
 
 // parseTime will parses a string parameter into a time.Time using the RFC3339 format
 func parseTime(param string) (time.Time, error) {
-	if param == "" {
-		return time.Time{}, nil
-	}
-	return time.Parse(time.RFC3339, param)
+	return common.ParseISO8601DateTime(param)
 }
 
 type Number interface {
@@ -356,4 +355,47 @@ func parseNumericArrayParameter[T Number](param, delim string, required bool, fn
 // parseQuery parses query parameters and returns an error if any malformed value pairs are encountered.
 func parseQuery(rawQuery string) (url.Values, error) {
 	return url.ParseQuery(rawQuery)
+}
+
+func encodeIdentifierForPath(identifier string) string {
+	if identifier == "" {
+		return ""
+	}
+
+	return base64.RawURLEncoding.EncodeToString([]byte(identifier))
+}
+
+func (c *AssetAdministrationShellRegistryAPIAPIController) buildBaseLocation(r *http.Request) string {
+	return common.APIBaseLocation(r, c.contextPath)
+}
+
+func (c *AssetAdministrationShellRegistryAPIAPIController) buildAASDescriptorLocationFromEncodedIdentifier(r *http.Request, encodedAASIdentifier string) string {
+	baseLocation := c.buildBaseLocation(r)
+	if baseLocation == "" {
+		return ""
+	}
+
+	escapedAASIdentifier := url.PathEscape(encodedAASIdentifier)
+
+	return baseLocation + "/shell-descriptors/" + escapedAASIdentifier
+}
+
+func (c *AssetAdministrationShellRegistryAPIAPIController) buildAASDescriptorLocationFromRawId(r *http.Request, rawAASID string) string {
+	return c.buildAASDescriptorLocationFromEncodedIdentifier(r, encodeIdentifierForPath(rawAASID))
+}
+
+func (c *AssetAdministrationShellRegistryAPIAPIController) buildSubmodelDescriptorLocationFromEncodedIdentifier(r *http.Request, encodedAASIdentifier string, encodedSubmodelIdentifier string) string {
+	baseLocation := c.buildBaseLocation(r)
+	if baseLocation == "" {
+		return ""
+	}
+
+	escapedAASIdentifier := url.PathEscape(encodedAASIdentifier)
+	escapedSubmodelIdentifier := url.PathEscape(encodedSubmodelIdentifier)
+
+	return baseLocation + "/shell-descriptors/" + escapedAASIdentifier + "/submodel-descriptors/" + escapedSubmodelIdentifier
+}
+
+func (c *AssetAdministrationShellRegistryAPIAPIController) buildSubmodelDescriptorLocationFromRawId(r *http.Request, encodedAASIdentifier string, rawSubmodelID string) string {
+	return c.buildSubmodelDescriptorLocationFromEncodedIdentifier(r, encodedAASIdentifier, encodeIdentifierForPath(rawSubmodelID))
 }

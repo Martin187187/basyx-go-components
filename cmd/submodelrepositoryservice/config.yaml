@@ -1,15 +1,99 @@
+logging:
+  format: text
+  level: info
+
 server:
   port: 5004
   contextPath: ""
   host: 0.0.0.0
+  strictVerification: permissive  # Values: off|permissive|strict (default: permissive)
+  verificationEndpointAvailable: true
+  readHeaderTimeoutSeconds: 15
+  readTimeoutSeconds: 300
+  writeTimeoutSeconds: 300
+  idleTimeoutSeconds: 60
+  shutdownTimeoutSeconds: 10
+  pagination:
+    defaultLimit: 100  # Page size when a request omits limit.
+    maxLimit: 1000  # Larger limits are rejected with 400.
 
 postgres:
+  # Choose exactly one connection variant:
+  # 1) individual fields below, or 2) dsn. Do not mix dsn with host/port/user/password/dbname/ssl settings.
+  # Pool settings may be used with either variant.
+  # dsn: postgres://user:password@localhost:5432/basyx?sslmode=require
   host: localhost
   port: 5432
-  user: admin
-  password: admin123
+  user: postgres
+  password: postgres
   # dbname: basyxGoBenchmarkTest
-  dbname: basyxTestDB
-  maxOpenConnections: 500
-  maxIdleConnections: 500
+  dbname: basyx
+  # sslmode: disable
+  # sslcert: ""
+  # sslkey: ""
+  # sslrootcert: ""
+  # connectTimeoutSeconds: 0
+  # applicationName: ""
+  # fallbackApplicationName: ""
+  # searchPath: ""
+  # options: ""
+  # timezone: ""
+  maxOpenConnections: 50
+  maxIdleConnections: 25
   connMaxLifetimeMinutes: 5
+  connMaxIdleTimeMinutes: 0
+  # Optional eventually consistent reader. Omit to reuse the writer pool.
+  # reader:
+  #   host: postgres-reader
+  #   port: 5432
+  #   user: postgres
+  #   password: postgres
+  #   dbname: basyx
+  #   sslmode: require
+  #   maxOpenConnections: 50
+  #   maxIdleConnections: 25
+  #   connMaxLifetimeMinutes: 5
+  #   connMaxIdleTimeMinutes: 0
+
+oidc:
+  trustlistPath: "config/trustlist.json"
+
+abac:
+  enabled: false
+  modelPath: "config/access_rules/access-rules.json"
+
+general:
+  aasRegistryIntegration: false
+  submodelRegistryIntegration: false
+  externalUrl: ""
+  uploadMaxSizeBytes: 134217728
+  delegatedOperationResponseMaxSizeBytes: 1048576
+  aasxMaxPartCount: 10000
+  aasxMaxOPCMetadataSizeBytes: 16777216
+  aasxMaxPartExpandedSizeBytes: 134217728
+  aasxMaxTotalExpandedSizeBytes: 536870912
+  aasxMaxThumbnailSizeBytes: 16777216
+
+# jws:
+#   privateKeyPath: "./rsa-key.pem"
+#   certificateChainPath: "./rsa-cert.pem"
+
+# Event Feed (CloudEvents REST). Requires DB schema >= v1.2.0 (feed_events).
+# Set eventing.feed.enabled: true to opt in. MQTT/Kafka sinks stay unimplemented.
+eventing:
+  enabled: false
+  format: cloudevents
+  feed:
+    enabled: false
+    maxAgeDays: 30
+    hardDeleteGraceDays: 10
+    sourceBaseUrl: ""  # Defaults to general.externalUrl, then the local server URL.
+    schemaBaseUrl: ""  # Defaults to the schemas served by this API.
+    cleanupIntervalHours: 24
+    publishIntervalMillis: 250
+
+# swagger:
+#   enabled: true
+#   contactName: "Eclipse BaSyx"
+#   contactEmail: "basyx-dev@eclipse.org"
+#   contactUrl: "https://basyx.org"

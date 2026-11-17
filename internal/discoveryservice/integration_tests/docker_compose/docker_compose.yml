@@ -1,13 +1,12 @@
 services:
   db:
-    image: postgres:15
-    container_name: postgres_db
+    image: postgres:18
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: admin123
       POSTGRES_DB: basyxTestDB
     ports:
-      - "5432:5432"
+      - "127.0.0.1:${BASYX_IT_DB_PORT:-5432}:5432"
     command: ["postgres", "-c", "listen_addresses=*"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin -d basyxTestDB"]
@@ -16,7 +15,6 @@ services:
       retries: 5
 
   aas-discovery:
-    container_name: aas-discovery
     build:
       context: ../../../..
       dockerfile: ./cmd/discoveryservice/Dockerfile
@@ -27,14 +25,39 @@ services:
       - POSTGRES_USER=admin
       - POSTGRES_PASSWORD=admin123
       - POSTGRES_DBNAME=basyxTestDB
+      - POSTGRES_READER_HOST=db
+      - POSTGRES_READER_PORT=5432
+      - POSTGRES_READER_USER=admin
+      - POSTGRES_READER_PASSWORD=admin123
+      - POSTGRES_READER_DBNAME=basyxTestDB
+      - POSTGRES_READER_OPTIONS=-c default_transaction_read_only=on
+      - POSTGRES_READER_MAXOPENCONNECTIONS=500
+      - POSTGRES_READER_MAXIDLECONNECTIONS=500
       - POSTGRES_MAXOPENCONNECTIONS=500
       - POSTGRES_MAXIDLECONNECTIONS=500
       - POSTGRES_CONNMAXLIFETIMEMINUTES=5
       - ABAC_ENABLED=false
     ports:
-      - "5004:5004"
+      - "127.0.0.1:${BASYX_IT_API_PORT:-6004}:5004"
+    depends_on:
+      basyx_configuration:
+        condition: service_completed_successfully
+    extra_hosts:
+      - "localhost:host-gateway"
+
+  basyx_configuration:
+    build:
+      context: ../../../..
+      dockerfile: ./cmd/basyxconfigurationservice/Dockerfile
+    environment:
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=admin123
+      - POSTGRES_DBNAME=basyxTestDB
+      - POSTGRES_MAXOPENCONNECTIONS=500
+      - POSTGRES_MAXIDLECONNECTIONS=500
+      - POSTGRES_CONNMAXLIFETIMEMINUTES=5
     depends_on:
       db:
         condition: service_healthy
-    extra_hosts:
-      - "localhost:host-gateway"

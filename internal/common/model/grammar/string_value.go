@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -25,7 +25,11 @@
 
 // Package grammar defines the data structures for representing string values in the grammar model.
 // Author: Aaron Zielstorff ( Fraunhofer IESE ), Jannik Fried ( Fraunhofer IESE )
+//
+//nolint:all
 package grammar
+
+import "github.com/eclipse-basyx/basyx-go-components/internal/common"
 
 // StringValue represents a string value in the grammar model, which can be a literal string, a field reference, or a string cast.
 type StringValue struct {
@@ -40,4 +44,45 @@ type StringValue struct {
 
 	// StrVal corresponds to the JSON schema field "$strVal".
 	StrVal *StandardString `json:"$strVal,omitempty" yaml:"$strVal,omitempty" mapstructure:"$strVal,omitempty"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler for StringValue.
+func (v *StringValue) UnmarshalJSON(value []byte) error {
+	if _, err := singleJSONMember(value, "string-value"); err != nil {
+		return err
+	}
+
+	type Plain StringValue
+	var plain Plain
+	if err := common.UnmarshalAndDisallowUnknownFields(value, &plain); err != nil {
+		return err
+	}
+	if plain.Attribute != nil {
+		if err := validateAttributeValue(plain.Attribute); err != nil {
+			return err
+		}
+	}
+
+	*v = StringValue(plain)
+	return nil
+}
+
+// AssertStringValueRequired checks if the required fields are not zero-ed
+func AssertStringValueRequired(obj StringValue) error {
+	if obj.StrCast != nil {
+		if err := AssertValueRequired(*obj.StrCast); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// AssertStringValueConstraints checks if the values respects the defined constraints
+func AssertStringValueConstraints(obj StringValue) error {
+	if obj.StrCast != nil {
+		if err := AssertValueConstraints(*obj.StrCast); err != nil {
+			return err
+		}
+	}
+	return nil
 }

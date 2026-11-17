@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (C) 2025 the Eclipse BaSyx Authors and Fraunhofer IESE
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
 *
 * Permission is hereby granted, free of charge, to any person obtaining
 * a copy of this software and associated documentation files (the
@@ -22,27 +22,19 @@
 *
 * SPDX-License-Identifier: MIT
 ******************************************************************************/
-
-// Package auth contains authentication and authorization helpers, including
-// OIDC verification, ABAC evaluation, and shared types used by the HTTP
-// middleware and OpenAPI controllers.
-//
-// This file implements the ABAC "engine": parsing an access model, materializing
-// rules, and evaluating requests against those rules to yield an allow/deny
-// decision and an optional QueryFilter.
-//
 // Author: Martin Stemmer ( Fraunhofer IESE )
+
 package auth
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"path"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/builder"
 	"github.com/eclipse-basyx/basyx-go-components/internal/common/model/grammar"
+	api "github.com/go-chi/chi/v5"
 	jsoniter "github.com/json-iterator/go"
 )
 
@@ -50,27 +42,93 @@ import (
 // (ARM) used by the ABAC engine. It holds the generated schema and provides
 // evaluation helpers.
 type AccessModel struct {
-	gen grammar.AccessRuleModelSchemaJSON
+	gen               grammar.AccessRuleModelSchemaJSON
+	apiRouter         *api.Mux
+	rules             []materializedRule
+	semanticReadRules map[SemanticResourceKind][]compiledSemanticReadRule
+	basePath          string
+	policyID          string
+}
+
+type materializedRule struct {
+	id         string
+	acl        grammar.ACL
+	attrs      []grammar.AttributeItem
+	objs       []grammar.ObjectItem
+	lexpr      *grammar.LogicalExpression
+	filterList []grammar.AccessPermissionRuleFILTER
+}
+
+// PolicyID returns the deterministic identifier of the policy version used to
+// compile this access model. File-only compatibility models may return an empty
+// value.
+func (m *AccessModel) PolicyID() string {
+	if m == nil {
+		return ""
+	}
+	return m.policyID
+}
+
+// WithPolicyID stores the durable policy identifier on a compiled access model.
+//
+// The method returns the receiver so callers can chain it while building
+// repository-backed models.
+func (m *AccessModel) WithPolicyID(policyID string) *AccessModel {
+	if m == nil {
+		return nil
+	}
+	m.policyID = policyID
+	return m
+}
+
+// ActiveAccessModel returns m, so a fixed model is its own provider.
+func (m *AccessModel) ActiveAccessModel() *AccessModel {
+	return m
 }
 
 // ParseAccessModel parses a JSON (or YAML converted to JSON) payload that
 // conforms to the Access Rule Model schema and returns a compiled AccessModel.
-func ParseAccessModel(b []byte) (*AccessModel, error) {
+func ParseAccessModel(b []byte, apiRouter *api.Mux, basePath string) (*AccessModel, error) {
 	var m grammar.AccessRuleModelSchemaJSON
 	var json = jsoniter.ConfigCompatibleWithStandardLibrary
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, fmt.Errorf("parse access model: %w", err)
 	}
-	return &AccessModel{gen: m}, nil
+
+	rules, err := materializeRules(m.AllAccessPermissionRules)
+	if err != nil {
+		return nil, fmt.Errorf("parse access model: %w", err)
+	}
+
+	model, err := compileAccessModel(&AccessModel{
+		gen:       m,
+		apiRouter: apiRouter,
+		rules:     rules,
+		basePath:  basePath,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("parse access model: %w", err)
+	}
+	return model, nil
 }
 
-// EvalInput is the minimal set of request properties the ABAC engine needs to
-// evaluate a decision. IssuedUTC should be in UTC.
-type EvalInput struct {
-	Method    string
-	Path      string
-	Claims    Claims
-	IssuedUTC time.Time
+// compileAccessModel validates and precompiles the routes of all rules and
+// derives the semantic read rules. Every load path must use it, so stored
+// policies are checked like configured ones.
+func compileAccessModel(model *AccessModel) (*AccessModel, error) {
+	if err := prepareRuleRoutes(model.rules, model.basePath); err != nil {
+		return nil, err
+	}
+	model.semanticReadRules = buildSemanticReadRules(model.rules, model.basePath)
+	return model, nil
+}
+
+// BasePath returns the access-model context path used to match IDENTIFIABLE routes.
+func (m *AccessModel) BasePath() string {
+	if m == nil {
+		return ""
+	}
+	return m.basePath
 }
 
 // QueryFilter captures optional, fine-grained restrictions produced by a rule
@@ -78,291 +136,475 @@ type EvalInput struct {
 // mutations, or redact fields. The Discovery Service currently does not require
 // a concrete filter structure; extend this struct when needed.
 type QueryFilter struct {
-	// TODO: not implemented because DiscoveryService does not need a concrete QueryFilter yet.
+	Formula         *grammar.LogicalExpression                       `json:"Formula,omitempty" yaml:"Formula,omitempty" mapstructure:"Formula,omitempty"`
+	FormulasByRight map[grammar.RightsEnum]grammar.LogicalExpression `json:"FormulasByRight,omitempty" yaml:"FormulasByRight,omitempty" mapstructure:"FormulasByRight,omitempty"`
+	Filters         FragmentFilters                                  `json:"Filters,omitempty" yaml:"Filters,omitempty" mapstructure:"Filters,omitempty"`
+}
+
+// DecisionCode represents the result of an authorization check.
+// It is serialized as a JSON string for consistent use in controller
+// responses and API payloads.
+type DecisionCode string
+
+const (
+	// DecisionAllow indicates that the authorization check succeeded
+	// and the requested action is permitted.
+	DecisionAllow DecisionCode = "ALLOW"
+
+	// DecisionNoMatch indicates that no matching rule or policy was found
+	// for the authorization check, resulting in a neutral or deny outcome.
+	DecisionNoMatch DecisionCode = "NO_MATCH"
+
+	// DecisionRouteNotFound indicates the requested method/path does not match
+	// any registered route and should be handled by the router (e.g., 404).
+	DecisionRouteNotFound DecisionCode = "ROUTE_NOT_FOUND"
+)
+
+// AuthorizationEvaluation records the detailed outcome of an ABAC evaluation.
+//
+// ABACMiddleware uses this richer result to pass allow metadata to audit
+// middleware while preserving the older AuthorizeWithFilter return contract for
+// callers that only need access and query-filter decisions.
+type AuthorizationEvaluation struct {
+	// Allowed is true when the request is permitted by at least one allow rule.
+	Allowed bool
+
+	// Reason describes the authorization result, including deny/pass-through cases.
+	Reason DecisionCode
+
+	// QueryFilter contains optional backend filter constraints for allowed requests.
+	QueryFilter *QueryFilter
+
+	// PolicyID identifies the active policy version that produced the decision.
+	PolicyID string
+
+	// MatchedRuleID contains deterministic IDs for matched allow rules.
+	//
+	// Multiple IDs are comma-separated in configured rule order. The field is
+	// empty when no allow rule matched or rule metadata is unavailable.
+	MatchedRuleID string
+
+	alternatives []CompiledGrantAlternative
 }
 
 // AuthorizeWithFilter evaluates the request against the model rules in order.
 // It returns whether access is allowed, a human-readable reason, and an optional
 // QueryFilter for controllers to enforce (e.g., tenant scoping, redactions).
-func (m *AccessModel) AuthorizeWithFilter(in EvalInput) (ok bool, reason string, qf *QueryFilter) {
-	right := mapMethodToRight(in.Method)
-	all := m.gen.AllAccessPermissionRules
+// It is important that this function does not throw errors. It either gives access or no access.
+//
+//nolint:revive // i will refactor this function at some point
+func (m *AccessModel) AuthorizeWithFilter(in EvalInput) (bool, DecisionCode, *QueryFilter) {
+	result := m.AuthorizeWithFilterWithOptions(in, grammar.DefaultSimplifyOptions())
+	return result.Allowed, result.Reason, result.QueryFilter
+}
 
-	for _, r := range all.Rules {
-		acl, attrs, objs, lexpr := materialize(all, r)
+// AuthorizeWithFilterWithOptions evaluates the request and returns audit-friendly metadata.
+//
+// The evaluation semantics are identical to AuthorizeWithFilter, but callers can
+// control backend simplification behavior, for example implicit casts. In
+// addition to the allow decision and optional query filter, the returned value
+// contains the deterministic matched rule identifiers used by history audit
+// enrichment.
+//
+// Parameters:
+//   - in: Request method, path, and claims used by the ABAC evaluator.
+//   - opts: Simplification options for backend filter generation.
+//
+// Returns:
+//   - AuthorizationEvaluation: Access decision, decision reason, optional query
+//     filter, and comma-separated matched allow rule IDs.
+//
+// Example:
+//
+//	opts := grammar.DefaultSimplifyOptions()
+//	opts.EnableImplicitCasts = true
+//	result := model.AuthorizeWithFilterWithOptions(input, opts)
+//	if result.Allowed {
+//		ctx = ContextWithAuthorizationDecision(ctx, AuthorizationDecision{
+//			Result:        string(DecisionAllow),
+//			MatchedRuleID: result.MatchedRuleID,
+//		})
+//	}
+//
+// nolint:revive // This function is the heart of ABAC and is complicated. Sorry cognitive-complexity!
+func (m *AccessModel) AuthorizeWithFilterWithOptions(in EvalInput, opts grammar.SimplifyOptions) AuthorizationEvaluation {
+	rightAlternatives, mapped, routeFound := m.mapMethodAndPathToRights(in)
+	if !routeFound {
+		return AuthorizationEvaluation{Reason: DecisionRouteNotFound}
+	}
+	if !mapped {
+		return AuthorizationEvaluation{Reason: DecisionNoMatch}
+	}
+	globals := globalAttributesForEvaluation(in.Globals, in.Claims, time.Now())
+	resolver := func(attr grammar.AttributeValue) any {
+		return resolveAttributeValue(attr, in.Claims, globals)
+	}
 
-		fmt.Println("rule: ", r.USEOBJECTS)
+	var ruleExprs []QueryFilter
+	var grantAlternatives []CompiledGrantAlternative
+	allFragments := make(map[grammar.FragmentStringPattern]struct{})
+	matchedRuleIDs := make([]string, 0, len(m.rules))
+	relevantRights := collectRelevantRights(rightAlternatives)
+	ruleExprsByRight := make(map[grammar.RightsEnum][]grammar.LogicalExpression, len(relevantRights))
+
+	for _, r := range m.rules {
+		acl, attrs, objs, lexpr := r.acl, r.attrs, r.objs, r.lexpr
+		// Gate 0: check disabled
+		if acl.ACCESS == grammar.ACLACCESSDISABLED {
+			continue
+		}
 		// Gate 1: rights
-		if !rightsContains(acl.RIGHTS, right) {
+		if !rightsContainsAny(acl.RIGHTS, rightAlternatives) {
 			continue
 		}
-		// Gate 2: route
-		if !matchRouteObjectsObjItem(objs, in.Path) {
+		// Gate 2: attributes
+		if !attributesSatisfiedAll(attrs, in.Claims) {
 			continue
 		}
-		// Gate 3: attributes
-		if !attributesSatisfiedAttrs(attrs, in.Claims) {
-			continue
-		}
-		// Gate 4: formula
-		if lexpr != nil && !evalLE(*lexpr, in.Claims, in.IssuedUTC) {
+		// Gate 3: objects
+		accessWithOptinalFilter := matchObjects(objs, in.Path, m.basePath, in.objectContext)
+		if !accessWithOptinalFilter.access {
 			continue
 		}
 
-		// Optional data-level restrictions (to be defined by the product)
+		combinedLE := lexpr
+		if accessWithOptinalFilter.le != nil {
+			if combinedLE == nil {
+				// no rule formula -> use route formula as-is
+				combinedLE = accessWithOptinalFilter.le
+			} else {
+				// wrap both in an AND
+				andExpr := grammar.LogicalExpression{
+					And: []grammar.LogicalExpression{
+						*combinedLE,
+						*accessWithOptinalFilter.le,
+					},
+				}
+				combinedLE = &andExpr
+			}
+		}
+
+		// Gate 4: formula → adapt for backend filtering
+		if combinedLE == nil {
+			// rule has no formula: should not happen -> deny access
+			return AuthorizationEvaluation{Reason: DecisionNoMatch}
+		}
+
+		adapted, decision := combinedLE.SimplifyForBackendFilterWithOptions(resolver, opts)
+		if decision == grammar.SimplifyFalse || decision == grammar.SimplifyIndeterminate {
+			continue
+		}
+		if r.id != "" {
+			matchedRuleIDs = append(matchedRuleIDs, r.id)
+		}
+		fragments := make(FragmentFilters)
+		for _, filter := range r.filterList {
+			fragment := *filter.FRAGMENT
+			matchMode := filter.MATCH != nil && *filter.MATCH
+			simplifiedCondition, _ := filter.CONDITION.SimplifyForBackendFilterWithOptions(resolver, opts)
+			condition := NewFragmentFilterPredicate(simplifiedCondition, matchMode)
+			if existing, ok := fragments[fragment]; ok {
+				fragments[fragment] = AndFragmentFilterPredicates(existing, condition)
+			} else {
+				fragments[fragment] = condition
+			}
+			allFragments[fragment] = struct{}{}
+		}
+
+		for _, right := range relevantRights {
+			if !ruleAllowsRight(acl.RIGHTS, right) {
+				continue
+			}
+			ruleExprsByRight[right] = append(ruleExprsByRight[right], adapted)
+		}
+
+		ruleExprs = append(ruleExprs, QueryFilter{
+			Formula: &adapted,
+			Filters: fragments,
+		})
+		grantAlternatives = append(grantAlternatives, CompiledGrantAlternative{
+			ruleID:    r.id,
+			formula:   adapted,
+			filters:   fragments,
+			coverages: accessWithOptinalFilter.coverages,
+		})
+	}
+
+	if len(ruleExprs) == 0 {
+		return AuthorizationEvaluation{Reason: DecisionNoMatch}
+	}
+
+	combined := grammar.LogicalExpression{Or: []grammar.LogicalExpression{}}
+	combinedFragments := mergeRuleFragmentFilters(ruleExprs, allFragments)
+	for _, qfr := range ruleExprs {
+		combined.Or = append(combined.Or, *qfr.Formula)
+	}
+
+	simplified, decision := combined.SimplifyForBackendFilterWithOptions(resolver, opts)
+	combinedByRight := make(map[grammar.RightsEnum]grammar.LogicalExpression, len(relevantRights))
+	for _, right := range relevantRights {
+		combinedByRight[right] = boolExpression(false)
+		expressions := ruleExprsByRight[right]
+		if len(expressions) == 0 {
+			continue
+		}
+
+		combinedRight := grammar.LogicalExpression{
+			Or: expressions,
+		}
+		simplifiedRight, rightDecision := combinedRight.SimplifyForBackendFilterWithOptions(resolver, opts)
+		switch rightDecision {
+		case grammar.SimplifyFalse, grammar.SimplifyIndeterminate:
+			combinedByRight[right] = boolExpression(false)
+		case grammar.SimplifyTrue:
+			combinedByRight[right] = boolExpression(true)
+		default:
+			combinedByRight[right] = simplifiedRight
+		}
+	}
+
+	hasFormula := true
+	switch decision {
+	case grammar.SimplifyFalse, grammar.SimplifyIndeterminate:
+		return AuthorizationEvaluation{Reason: DecisionNoMatch}
+	case grammar.SimplifyTrue:
+		hasFormula = false
+	}
+
+	hasRightScopedFormulas := len(combinedByRight) > 0
+	var qf *QueryFilter
+	if hasFormula || len(combinedFragments) > 0 || hasRightScopedFormulas {
 		qf = &QueryFilter{}
-
-		switch acl.ACCESS {
-		case grammar.ACLACCESSALLOW:
-			return true, "ALLOW by rule", qf
-		case grammar.ACLACCESSDISABLED:
-			return false, "DENY (disabled) by rule", nil
-		default:
-			return false, "DENY (unknown access) by rule", nil
+		if hasFormula {
+			qf.Formula = &simplified
 		}
-	}
-	return false, "no matching rule", nil
-}
-
-// Authorize evaluates the request and returns an allow/deny boolean and a
-// reason, without producing a QueryFilter. Prefer AuthorizeWithFilter in new code.
-func (m *AccessModel) Authorize(in EvalInput) (bool, string) {
-	right := mapMethodToRight(in.Method)
-
-	all := m.gen.AllAccessPermissionRules
-	for _, r := range all.Rules {
-		acl, attrs, objs, lexpr := materialize(all, r)
-
-		if !rightsContains(acl.RIGHTS, right) {
-			continue
+		if hasRightScopedFormulas {
+			qf.FormulasByRight = combinedByRight
 		}
-		// Note: currently rejects access if no route is defined.
-		if !matchRouteObjectsObjItem(objs, in.Path) {
-			continue
-		}
-		if !attributesSatisfiedAttrs(attrs, in.Claims) {
-			continue
-		}
-		if lexpr != nil && !evalLE(*lexpr, in.Claims, in.IssuedUTC) {
-			continue
-		}
-
-		switch acl.ACCESS {
-		case grammar.ACLACCESSALLOW:
-			return true, "ALLOW by rule"
-		case grammar.ACLACCESSDISABLED:
-			return false, "DENY (disabled) by rule"
-		default:
-			return false, "DENY (unknown access) by rule"
+		if len(combinedFragments) > 0 {
+			qf.Filters = combinedFragments
 		}
 	}
 
-	return false, "no matching rule"
+	return AuthorizationEvaluation{
+		Allowed:       true,
+		Reason:        DecisionAllow,
+		QueryFilter:   qf,
+		PolicyID:      m.policyID,
+		MatchedRuleID: strings.Join(matchedRuleIDs, ","),
+		alternatives:  grantAlternatives,
+	}
 }
 
-// materialize resolves a rule's references (USEACL, USEOBJECTS, USEFORMULA) into
-// concrete ACL, attributes, objects, and an optional logical expression.
-func materialize(all grammar.AccessRuleModelSchemaJSONAllAccessPermissionRules, r grammar.AccessPermissionRule) (grammar.ACL, []grammar.AttributeItem, []grammar.ObjectItem, *grammar.LogicalExpression) {
-	// ACL / USEACL
-	acl := grammar.ACL{}
-	if r.ACL != nil {
-		acl = *r.ACL
-	} else if r.USEACL != nil {
-		use := *r.USEACL
-		for _, d := range all.DEFACLS {
-			if d.Name == use {
-				acl = d.ACL
-				break
+func rightsContainsAny(hay []grammar.RightsEnum, alternatives [][]grammar.RightsEnum) bool {
+	for _, rights := range alternatives {
+		for _, right := range rights {
+			if ruleAllowsRight(hay, right) {
+				return true
 			}
 		}
 	}
-
-	// Attributes: inline + referenced
-	var attrs []grammar.AttributeItem
-	if acl.ATTRIBUTES != nil {
-		attrs = append(attrs, acl.ATTRIBUTES...)
-	}
-	if acl.USEATTRIBUTES != nil {
-		use := *acl.USEATTRIBUTES
-		for _, d := range all.DEFATTRIBUTES {
-			if d.Name == use {
-				attrs = append(attrs, d.Attributes...)
-				break
-			}
-		}
-	}
-
-	// Objects: inline + referenced (with recursive resolution)
-	var objs []grammar.ObjectItem
-	if len(r.OBJECTS) > 0 {
-		objs = append(objs, r.OBJECTS...)
-	}
-	if len(r.USEOBJECTS) > 0 {
-		objs = append(objs, resolveObjects(all, r.USEOBJECTS)...)
-	}
-
-	// Formula: inline or referenced
-	var f *grammar.LogicalExpression
-	if r.FORMULA != nil {
-		f = r.FORMULA
-	} else if r.USEFORMULA != nil {
-		use := *r.USEFORMULA
-		for _, d := range all.DEFFORMULAS {
-			if d.Name == use {
-				tmp := d.Formula
-				f = &tmp
-				break
-			}
-		}
-	}
-
-	return acl, attrs, objs, f
+	return false
 }
 
-// resolveObjects expands DEFOBJECTS references (including nested USEOBJECTS)
-// into a concrete object list.
-func resolveObjects(all grammar.AccessRuleModelSchemaJSONAllAccessPermissionRules, names []string) []grammar.ObjectItem {
-	var out []grammar.ObjectItem
-	for _, name := range names {
-		for _, d := range all.DEFOBJECTS {
-			if d.Name == name {
-				if len(d.Objects) > 0 {
-					out = append(out, d.Objects...)
-				}
-				if len(d.USEOBJECTS) > 0 {
-					out = append(out, resolveObjects(all, d.USEOBJECTS)...)
+func collectRelevantRights(alternatives [][]grammar.RightsEnum) []grammar.RightsEnum {
+	seen := make(map[grammar.RightsEnum]struct{})
+	rights := make([]grammar.RightsEnum, 0)
+	for _, alternative := range alternatives {
+		for _, right := range alternative {
+			if _, ok := seen[right]; ok {
+				continue
+			}
+			seen[right] = struct{}{}
+			rights = append(rights, right)
+		}
+	}
+	return rights
+}
+
+func ruleAllowsRight(ruleRights []grammar.RightsEnum, right grammar.RightsEnum) bool {
+	for _, ruleRight := range ruleRights {
+		if ruleRight == grammar.RightsEnumALL || ruleRight == right {
+			return true
+		}
+	}
+	return false
+}
+
+func boolExpression(v bool) grammar.LogicalExpression {
+	return grammar.LogicalExpression{
+		Boolean: &v,
+	}
+}
+
+type fragmentShapeGroup struct {
+	fragment  grammar.FragmentStringPattern
+	fragments []grammar.FragmentStringPattern
+}
+
+func mergeRuleFragmentFilters(
+	ruleExprs []QueryFilter,
+	allFragments map[grammar.FragmentStringPattern]struct{},
+) FragmentFilters {
+	combined := make(FragmentFilters)
+	for _, group := range groupFragmentsByShape(allFragments) {
+		alternatives := make([]FragmentFilterPredicate, 0, len(ruleExprs))
+		for _, ruleExpr := range ruleExprs {
+			alternative := []FragmentFilterPredicate{newGlobalFragmentFilterPredicate(*ruleExpr.Formula)}
+			for _, fragment := range group.fragments {
+				if predicate, ok := ruleExpr.Filters[fragment]; ok {
+					alternative = append(alternative, scopeFragmentFilterPredicate(predicate, fragment))
 				}
 			}
+			alternatives = append(alternatives, AndFragmentFilterPredicates(alternative...))
+		}
+		predicate := OrFragmentFilterPredicates(alternatives...)
+		if unrestricted, constant := predicate.globalBooleanValue(); constant && unrestricted {
+			continue
+		}
+		combined[group.fragment] = predicate
+	}
+	return combined
+}
+
+func groupFragmentsByShape(fragments map[grammar.FragmentStringPattern]struct{}) []fragmentShapeGroup {
+	groupsByShape := make(map[string]*fragmentShapeGroup)
+	for fragment := range fragments {
+		shape := fragmentShapeKey(fragment)
+		group, ok := groupsByShape[shape]
+		if !ok {
+			group = &fragmentShapeGroup{fragment: wildcardFragment(fragment)}
+			groupsByShape[shape] = group
+		}
+		group.fragments = append(group.fragments, fragment)
+	}
+
+	shapes := make([]string, 0, len(groupsByShape))
+	for shape := range groupsByShape {
+		shapes = append(shapes, shape)
+	}
+	sort.Strings(shapes)
+
+	groups := make([]fragmentShapeGroup, 0, len(shapes))
+	for _, shape := range shapes {
+		group := groupsByShape[shape]
+		sort.Slice(group.fragments, func(i, j int) bool {
+			iIndexes := indexedFragmentTokenCount(group.fragments[i])
+			jIndexes := indexedFragmentTokenCount(group.fragments[j])
+			if iIndexes != jIndexes {
+				return iIndexes < jIndexes
+			}
+			return group.fragments[i] < group.fragments[j]
+		})
+		groups = append(groups, *group)
+	}
+	return groups
+}
+
+func indexedFragmentTokenCount(fragment grammar.FragmentStringPattern) int {
+	count := 0
+	for _, token := range builder.TokenizeField(string(fragment)) {
+		array, isArray := token.(builder.ArrayToken)
+		if isArray && array.Index >= 0 {
+			count++
 		}
 	}
+	return count
+}
+
+func fragmentShapeKey(fragment grammar.FragmentStringPattern) string {
+	parts := []string{fragmentRoot(fragment)}
+	for _, token := range builder.TokenizeField(string(fragment)) {
+		kind := "simple"
+		if _, isArray := token.(builder.ArrayToken); isArray {
+			kind = "array"
+		}
+		parts = append(parts, fmt.Sprintf("|%s:%d:%s", kind, len(token.GetName()), token.GetName()))
+	}
+	return strings.Join(parts, "")
+}
+
+func wildcardFragment(fragment grammar.FragmentStringPattern) grammar.FragmentStringPattern {
+	value := string(fragment)
+	wildcard := make([]byte, 0, len(value))
+	for len(value) > 0 {
+		open := strings.IndexByte(value, '[')
+		if open < 0 {
+			wildcard = append(wildcard, value...)
+			break
+		}
+		closeOffset := strings.IndexByte(value[open:], ']')
+		if closeOffset < 0 {
+			return fragment
+		}
+		wildcard = append(wildcard, value[:open]...)
+		wildcard = append(wildcard, '[', ']')
+		value = value[open+closeOffset+1:]
+	}
+	return grammar.FragmentStringPattern(string(wildcard))
+}
+
+// FilterPredicateEntriesFor returns all (fragment, predicate) pairs from
+// q.Filters whose tokenized fragment path matches the tokenized `key`.
+//
+// A fragment matches when, for every token position i:
+//   - token name matches (Token.GetName()), and
+//   - token kind matches (ArrayToken vs SimpleToken).
+//
+// For ArrayToken positions, the array index is ignored. This means a wildcard
+// key such as "...[]" matches entries like "...[0]", "...[1]", etc.
+//
+// Note: the returned slice order is not guaranteed (q.Filters is a map).
+func (q *QueryFilter) FilterPredicateEntriesFor(key grammar.FragmentStringPattern) []FragmentFilterEntry {
+	var out []FragmentFilterEntry
+	keyTokens := builder.TokenizeField(string(key))
+
+	for k, expr := range q.Filters {
+		if !fragmentRootsEqual(k, key) {
+			continue
+		}
+		kTokens := builder.TokenizeField(string(k))
+
+		if len(kTokens) != len(keyTokens) {
+			continue
+		}
+
+		matches := true
+		for i := 0; i < len(kTokens); i++ {
+			if kTokens[i].GetName() != keyTokens[i].GetName() {
+				matches = false
+				break
+			}
+
+			_, kIsArray := kTokens[i].(builder.ArrayToken)
+			_, keyIsArray := keyTokens[i].(builder.ArrayToken)
+			if kIsArray != keyIsArray {
+				matches = false
+				break
+			}
+			// If both are ArrayToken we intentionally ignore the ArrayToken.Index.
+		}
+
+		if matches {
+			out = append(out, FragmentFilterEntry{
+				Fragment:  k,
+				Predicate: expr,
+			})
+		}
+	}
+
 	return out
 }
 
-// mapMethodToRight maps an HTTP method into an abstract right used by the
-// Access Rule Model (CREATE, READ, UPDATE, DELETE). Unknown methods default to READ.
-func mapMethodToRight(meth string) grammar.RightsEnum {
-	switch strings.ToUpper(meth) {
-	case http.MethodGet, http.MethodHead:
-		return grammar.RightsEnumREAD
-	case http.MethodPost:
-		return grammar.RightsEnumCREATE
-	case http.MethodPut, http.MethodPatch:
-		return grammar.RightsEnumUPDATE
-	case http.MethodDelete:
-		return grammar.RightsEnumDELETE
-	default:
-		return grammar.RightsEnumREAD
-	}
+func fragmentRootsEqual(first grammar.FragmentStringPattern, second grammar.FragmentStringPattern) bool {
+	return fragmentRoot(first) == fragmentRoot(second)
 }
 
-// rightsContains returns true if the required right is included in the rule's
-// rights, or if the rule grants ALL rights.
-func rightsContains(hay []grammar.RightsEnum, needle grammar.RightsEnum) bool {
-	for _, r := range hay {
-		if strings.EqualFold(string(r), "ALL") {
-			return true
-		}
-		if strings.EqualFold(string(r), string(needle)) {
-			return true
-		}
+func fragmentRoot(fragment grammar.FragmentStringPattern) string {
+	fragmentString := string(fragment)
+	fragmentSeparator := strings.IndexAny(fragmentString, ".[#")
+	if fragmentSeparator < 0 {
+		return fragmentString
 	}
-	return false
-}
-
-// attributesSatisfiedAttrs returns true if the provided claims satisfy at least
-// one of the required attributes. Currently supports GLOBAL=ANONYMOUS and
-// CLAIM=<claimKey> checks.
-func attributesSatisfiedAttrs(items []grammar.AttributeItem, claims Claims) bool {
-	for _, it := range items {
-		switch it.Kind {
-		case grammar.ATTRGLOBAL:
-			if it.Value == "ANONYMOUS" {
-				return true
-			}
-		case grammar.ATTRCLAIM:
-			for key := range claims {
-				if it.Value == key {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
-// normalize cleans route patterns and request paths into a consistent absolute
-// form suitable for matching. "*" and "/*" are treated as wildcards.
-func normalize(p string) string {
-	if p == "" {
-		return "/"
-	}
-	if p != "*" && !strings.HasPrefix(p, "/") {
-		p = "/" + p
-	}
-	p = path.Clean(p)
-	return p
-}
-
-// matchRouteObjectsObjItem returns true if any ROUTE object matches the request
-// path. Supports exact match, prefix match using "/*", and global wildcards.
-func matchRouteObjectsObjItem(objs []grammar.ObjectItem, reqPath string) bool {
-	req := normalize(reqPath)
-
-	for _, oi := range objs {
-		if oi.Kind != grammar.Route {
-			continue
-		}
-		pat := normalize(oi.Value)
-
-		if pat == "*" || pat == "/*" {
-			return true
-		}
-
-		if strings.HasSuffix(pat, "/*") {
-			base := strings.TrimSuffix(pat, "/*")
-			if base != "" && strings.HasPrefix(req, base+"/") {
-				return true
-			}
-			continue
-		}
-
-		if pat == req {
-			return true
-		}
-	}
-	return false
-}
-
-// Cond is a helper alias used by logical evaluation and utility functions.
-type Cond map[string]any
-
-// asStringMap attempts to normalize arbitrary map-like values into a
-// map[string]string, best-effort. Useful when claims or attributes may be
-// represented heterogeneously by upstream libraries.
-func asStringMap(v any) (map[string]string, bool) {
-	switch vv := v.(type) {
-	case map[string]string:
-		return vv, true
-	case map[string]any:
-		out := make(map[string]string, len(vv))
-		for k, val := range vv {
-			out[k] = fmt.Sprint(val)
-		}
-		return out, true
-	default:
-		b, err := json.Marshal(v)
-		if err != nil {
-			return nil, false
-		}
-		var m map[string]any
-		var json = jsoniter.ConfigCompatibleWithStandardLibrary
-		if err := json.Unmarshal(b, &m); err != nil {
-			return nil, false
-		}
-		out := make(map[string]string, len(m))
-		for k, val := range m {
-			out[k] = fmt.Sprint(val)
-		}
-		return out, true
-	}
+	return fragmentString[:fragmentSeparator]
 }

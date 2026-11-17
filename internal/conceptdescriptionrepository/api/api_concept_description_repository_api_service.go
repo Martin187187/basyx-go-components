@@ -1,0 +1,400 @@
+/*******************************************************************************
+* Copyright (C) 2026 the Eclipse BaSyx Authors and Fraunhofer IESE
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+* LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+* WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+
+/*
+ * DotAAS Part 2 | HTTP/REST | Concept Description Repository Service Specification
+ *
+ * The ConceptDescription Repository Service Specification as part of [Specification of the Asset Administration Shell: Part 2](https://industrialdigitaltwin.org/en/content-hub/aasspecifications).   Copyright: Industrial Digital Twin Association (IDTA) March 2023
+ *
+ * API version: V3.2.0
+ * Contact: info@idtwin.org
+ */
+
+// Package api provides the Concept Description Repository API service implementation.
+package api
+
+import (
+	"context"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/FriedJannik/aas-go-sdk/jsonization"
+	"github.com/FriedJannik/aas-go-sdk/types"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model/grammar"
+	auth "github.com/eclipse-basyx/basyx-go-components/internal/common/security"
+	"github.com/eclipse-basyx/basyx-go-components/internal/conceptdescriptionrepository/persistence"
+)
+
+// ConceptDescriptionRepositoryAPIAPIService is a service that implements the logic for the ConceptDescriptionRepositoryAPIAPIServicer
+// This service should implement the business logic for every endpoint for the ConceptDescriptionRepositoryAPIAPI API.
+// Include any external packages or services that will be required by this service.
+type ConceptDescriptionRepositoryAPIAPIService struct {
+	d *persistence.ConceptDescriptionBackend
+}
+
+const componentName = "CDREPO"
+
+func pagedResponse[T any](results T, nextCursor string) model.ImplResponse {
+	pm := common.APIPagingMetadata(nextCursor)
+
+	res := struct {
+		PagingMetadata model.PagedResultPagingMetadata `json:"paging_metadata"`
+		Result         T                               `json:"result"`
+	}{
+		PagingMetadata: pm,
+		Result:         results,
+	}
+
+	return model.Response(http.StatusOK, res)
+}
+
+// NewConceptDescriptionRepositoryAPIAPIService creates a default api service
+func NewConceptDescriptionRepositoryAPIAPIService(database *persistence.ConceptDescriptionBackend) *ConceptDescriptionRepositoryAPIAPIService {
+	return &ConceptDescriptionRepositoryAPIAPIService{
+		d: database,
+	}
+}
+
+// QueryConceptDescriptions returns Concept Descriptions that match the provided
+// query expression and any ABAC query filter stored in ctx.
+//
+// The limit parameter bounds the number of returned Concept Descriptions. The
+// cursor parameter is optional, base64-url encoded, and decoded before it is
+// passed to the persistence layer. The query parameter contains the user
+// supplied condition and fragment filters for the /query/concept-descriptions
+// endpoint.
+//
+// The returned ImplResponse contains a paged result with JSON-serializable
+// Concept Description objects and an encoded cursor for the next page when more
+// results are available. Invalid limits, invalid cursors, denied access, or
+// unsupported query expressions are returned as HTTP error responses.
+func (s *ConceptDescriptionRepositoryAPIAPIService) QueryConceptDescriptions(ctx context.Context, limit int32, cursor string, query grammar.Query) (model.ImplResponse, error) {
+	decodedCursor, detail, paginationErr := common.DecodeAPIPagination(limit, cursor)
+	if paginationErr != nil {
+		return common.NewErrorResponse(paginationErr, http.StatusBadRequest, componentName, "QueryConceptDescriptions", detail), nil
+	}
+
+	const operation = "QueryConceptDescriptions"
+
+	if limit < 0 {
+		err := common.NewErrBadRequest("limit must be non-negative")
+		return common.NewErrorResponse(err, http.StatusBadRequest, componentName, operation, "BadLimit"), nil
+	}
+
+	uintLimit64, convErr := strconv.ParseUint(strconv.FormatInt(int64(limit), 10), 10, 64)
+	if convErr != nil {
+		err := common.NewErrBadRequest("invalid limit")
+		return common.NewErrorResponse(err, http.StatusBadRequest, componentName, operation, "BadLimit"), nil
+	}
+
+	queryCtx, queryContextErr := auth.WithAuthorizedQuery(ctx, auth.SemanticResourceCD, query)
+	if queryContextErr != nil {
+		return common.NewErrorResponse(queryContextErr, http.StatusInternalServerError, componentName, operation, "BuildAuthorizedQuery"), queryContextErr
+	}
+	if query.SelectsIdentifiers() {
+		identifiers, nextCursor, err := s.d.GetConceptDescriptionIdentifiers(queryCtx, uint(uintLimit64), &decodedCursor)
+		if err != nil {
+			return queryConceptDescriptionsErrorResponse(err)
+		}
+		return common.APIIdentifierQueryResponse(identifiers, nextCursor), nil
+	}
+	cds, nextCursor, err := s.d.GetConceptDescriptions(queryCtx, nil, uint(uintLimit64), &decodedCursor, time.Time{}, time.Time{})
+	if err != nil {
+		return queryConceptDescriptionsErrorResponse(err)
+	}
+
+	jsonable := make([]map[string]any, 0, len(cds))
+	for _, cd := range cds {
+		jsonObj, err := jsonization.ToJsonable(cd)
+		if err != nil {
+			return common.NewErrorResponse(err, http.StatusInternalServerError, componentName, operation, "ToJsonable"), err
+		}
+		jsonable = append(jsonable, jsonObj)
+	}
+
+	return pagedResponse(jsonable, nextCursor), nil
+}
+
+func queryConceptDescriptionsErrorResponse(err error) (model.ImplResponse, error) {
+	const operation = "QueryConceptDescriptions"
+	switch {
+	case common.IsErrBadRequest(err):
+		return common.NewErrorResponse(err, http.StatusBadRequest, componentName, operation, "BadRequest"), nil
+	case common.IsErrDenied(err):
+		return common.NewErrorResponse(err, http.StatusForbidden, componentName, operation, "Denied"), nil
+	default:
+		return common.NewErrorResponse(err, http.StatusInternalServerError, componentName, operation, "Unhandled"), err
+	}
+}
+
+// GetAllConceptDescriptions - Returns all Concept Descriptions
+func (s *ConceptDescriptionRepositoryAPIAPIService) GetAllConceptDescriptions(ctx context.Context, idShort string, isCaseOf string, dataSpecificationRef string, limit int32, cursor string, createdFrom time.Time, updatedFrom time.Time) (model.ImplResponse, error) {
+	decodedCursor, detail, paginationErr := common.DecodeAPIPagination(limit, cursor)
+	if paginationErr != nil {
+		return common.NewErrorResponse(paginationErr, http.StatusBadRequest, componentName, "GetAllConceptDescriptions", detail), nil
+	}
+
+	if limit < 0 {
+		err := common.NewErrBadRequest("limit must be non-negative")
+		return common.NewErrorResponse(err, http.StatusBadRequest, componentName, "GetAllConceptDescriptions", "BadLimit"), nil
+	}
+
+	uintLimit64, convErr := strconv.ParseUint(strconv.FormatInt(int64(limit), 10), 10, 64)
+	if convErr != nil {
+		err := common.NewErrBadRequest("invalid limit")
+		return common.NewErrorResponse(err, http.StatusBadRequest, componentName, "GetAllConceptDescriptions", "BadLimit"), nil
+	}
+	uintLimit := uint(uintLimit64)
+	ctx, selectorErr := auth.WithAuthorizedStringSelectors(
+		ctx,
+		auth.SemanticResourceCD,
+		auth.StringSelector{Field: "$cd#idShort", Value: idShort},
+	)
+	if selectorErr != nil {
+		return common.NewErrorResponse(selectorErr, http.StatusInternalServerError, componentName, "GetAllConceptDescriptions", "BuildAuthorizedSelectors"), selectorErr
+	}
+
+	selectors, decodeErr := decodeConceptDescriptionReferenceSelectors(isCaseOf, dataSpecificationRef)
+	if decodeErr != nil {
+		return common.NewErrorResponse(decodeErr, http.StatusBadRequest, componentName, "GetAllConceptDescriptions", "BadReference"), nil
+	}
+	ctx, referenceErr := auth.WithAuthorizedReferenceSelectors(ctx, auth.SemanticResourceCD, selectors...)
+	if referenceErr != nil {
+		return common.NewErrorResponse(referenceErr, http.StatusInternalServerError, componentName, "GetAllConceptDescriptions", "BuildAuthorizedSelectors"), nil
+	}
+	cds, nextCursor, err := s.d.GetConceptDescriptions(ctx, nil, uintLimit, &decodedCursor, createdFrom, updatedFrom)
+	if err != nil {
+		switch {
+		case common.IsErrBadRequest(err):
+			return common.NewErrorResponse(err, http.StatusBadRequest, componentName, "GetAllConceptDescriptions", "BadRequest"), nil
+		case common.IsErrDenied(err):
+			return common.NewErrorResponse(err, http.StatusForbidden, componentName, "GetAllConceptDescriptions", "Denied"), nil
+		default:
+			return common.NewErrorResponse(err, http.StatusInternalServerError, componentName, "GetAllConceptDescriptions", "Unhandled"), nil
+		}
+	}
+
+	jsonable := make([]map[string]any, 0, len(cds))
+	for _, cd := range cds {
+		jsonObj, err := jsonization.ToJsonable(cd)
+		if err != nil {
+			return common.NewErrorResponse(err, http.StatusInternalServerError, componentName, "GetAllConceptDescriptions", "ToJsonable"), nil
+		}
+		jsonable = append(jsonable, jsonObj)
+	}
+
+	return pagedResponse(jsonable, nextCursor), nil
+}
+
+// GetAllConceptDescriptionsRecentChanges returns changed Concept Descriptions.
+func (s *ConceptDescriptionRepositoryAPIAPIService) GetAllConceptDescriptionsRecentChanges(ctx context.Context, createdFrom time.Time, updatedFrom time.Time, limit int32, cursor string) (model.ImplResponse, error) {
+	decodedCursor, decodeErr := common.DecodeAPICursor(cursor)
+	if decodeErr != nil {
+		return common.NewErrorResponse(decodeErr, http.StatusBadRequest, componentName, "GetAllConceptDescriptionsRecentChanges", "BadCursor"), nil
+	}
+
+	normalizedLimit, limitErr := common.NormalizeRecentChangesLimit(limit)
+	if limitErr != nil {
+		return common.NewErrorResponse(limitErr, http.StatusBadRequest, componentName, "GetAllConceptDescriptionsRecentChanges", "BadRequest"), nil
+	}
+
+	uintLimit64, convErr := strconv.ParseUint(strconv.FormatInt(int64(normalizedLimit), 10), 10, 64)
+	if convErr != nil {
+		err := common.NewErrBadRequest("invalid limit")
+		return common.NewErrorResponse(err, http.StatusBadRequest, componentName, "GetAllConceptDescriptionsRecentChanges", "BadLimit"), nil
+	}
+
+	cds, nextCursor, err := s.d.GetConceptDescriptions(ctx, nil, uint(uintLimit64), &decodedCursor, createdFrom, updatedFrom)
+	if err != nil {
+		switch {
+		case common.IsErrBadRequest(err):
+			return common.NewErrorResponse(err, http.StatusBadRequest, componentName, "GetAllConceptDescriptionsRecentChanges", "BadRequest"), nil
+		case common.IsErrDenied(err):
+			return common.NewErrorResponse(err, http.StatusForbidden, componentName, "GetAllConceptDescriptionsRecentChanges", "Denied"), nil
+		default:
+			return common.NewErrorResponse(err, http.StatusInternalServerError, componentName, "GetAllConceptDescriptionsRecentChanges", "Unhandled"), nil
+		}
+	}
+
+	changes := make([]model.ConceptDescriptionRecentChange, 0, len(cds))
+	seenIDs := make(map[string]struct{}, len(cds))
+	for _, cd := range cds {
+		if cd == nil {
+			err = common.NewInternalServerError("CDREPO-GETCDRECENT-NILCD loaded ConceptDescription is nil")
+			return common.NewErrorResponse(err, http.StatusInternalServerError, componentName, "GetAllConceptDescriptionsRecentChanges", "GetConceptDescriptions"), nil
+		}
+		if _, seen := seenIDs[cd.ID()]; seen {
+			continue
+		}
+		createdAt, updatedAt, ok := common.RecentChangeTimestamps(cd.Administration())
+		if !ok {
+			continue
+		}
+		seenIDs[cd.ID()] = struct{}{}
+		changes = append(changes, model.ConceptDescriptionRecentChange{
+			RecentChange: model.RecentChange{
+				CreatedAt: createdAt,
+				UpdatedAt: updatedAt,
+			},
+			Id: cd.ID(),
+		})
+	}
+	return pagedResponse(changes, nextCursor), nil
+}
+
+// GetAllConceptDescriptionRecentChanges is kept for compatibility with older generated code.
+func (s *ConceptDescriptionRepositoryAPIAPIService) GetAllConceptDescriptionRecentChanges(ctx context.Context, createdFrom time.Time, updatedFrom time.Time, limit int32, cursor string) (model.ImplResponse, error) {
+	return s.GetAllConceptDescriptionsRecentChanges(ctx, createdFrom, updatedFrom, limit, cursor)
+}
+
+// PostConceptDescription - Creates a new Concept Description
+func (s *ConceptDescriptionRepositoryAPIAPIService) PostConceptDescription(ctx context.Context, conceptDescription types.IConceptDescription) (model.ImplResponse, error) {
+	err := s.d.CreateConceptDescription(ctx, conceptDescription)
+	if err != nil {
+		switch {
+		case common.IsErrBadRequest(err):
+			return common.NewErrorResponse(err, http.StatusBadRequest, componentName, "PostConceptDescription", "BadRequest"), nil
+		case common.IsErrConflict(err):
+			return common.NewErrorResponse(err, http.StatusConflict, componentName, "PostConceptDescription", "Conflict"), nil
+		case common.IsErrDenied(err):
+			return common.NewErrorResponse(err, http.StatusForbidden, componentName, "PostConceptDescription", "Denied"), nil
+		default:
+			return common.NewErrorResponse(err, http.StatusInternalServerError, componentName, "PostConceptDescription", "Unhandled"), nil
+		}
+	}
+
+	jsonable, toJsonErr := jsonization.ToJsonable(conceptDescription)
+	if toJsonErr != nil {
+		return common.NewErrorResponse(toJsonErr, http.StatusInternalServerError, componentName, "PostConceptDescription", "ToJsonable"), nil
+	}
+
+	return model.Response(http.StatusCreated, jsonable), nil
+}
+
+// GetConceptDescriptionById - Returns a specific Concept Description
+func (s *ConceptDescriptionRepositoryAPIAPIService) GetConceptDescriptionById(ctx context.Context, cdIdentifier string) (model.ImplResponse, error) {
+	decodedIdentifier, err := common.DecodeAPIIdentifier(cdIdentifier)
+	if err != nil {
+		return common.NewErrorResponse(err, http.StatusBadRequest, componentName, "GetConceptDescriptionById", "URLDecode"), nil
+	}
+	cd, err := s.d.GetConceptDescriptionByID(ctx, string(decodedIdentifier))
+	if err != nil {
+		switch {
+		case common.IsErrBadRequest(err):
+			return common.NewErrorResponse(err, http.StatusBadRequest, componentName, "GetConceptDescriptionById", "BadRequest"), nil
+		case common.IsErrDenied(err):
+			return common.NewErrorResponse(err, http.StatusForbidden, componentName, "GetConceptDescriptionById", "Denied"), nil
+		case common.IsErrNotFound(err):
+			return common.NewErrorResponse(err, http.StatusNotFound, componentName, "GetConceptDescriptionById", "NotFound"), nil
+		default:
+			return common.NewErrorResponse(err, http.StatusInternalServerError, componentName, "GetConceptDescriptionById", "Unhandled"), nil
+		}
+	}
+
+	var jsonable map[string]any
+	jsonable, err = jsonization.ToJsonable(cd)
+	if err != nil {
+		return common.NewErrorResponse(err, http.StatusInternalServerError, componentName, "GetConceptDescriptionById", "ToJsonable"), nil
+	}
+
+	return model.Response(http.StatusOK, jsonable), nil
+}
+
+// PutConceptDescriptionById - Creates or updates an existing Concept Description
+func (s *ConceptDescriptionRepositoryAPIAPIService) PutConceptDescriptionById(ctx context.Context, cdIdentifier string, conceptDescription types.IConceptDescription) (model.ImplResponse, error) {
+	decodedIdentifier, err := common.DecodeAPIIdentifier(cdIdentifier)
+	if err != nil {
+		return common.NewErrorResponse(err, http.StatusBadRequest, componentName, "PutConceptDescriptionById", "URLDecode"), nil
+	}
+	isUpdate, err := s.d.PutConceptDescription(ctx, string(decodedIdentifier), conceptDescription)
+	if err != nil {
+		switch {
+		case common.IsErrBadRequest(err):
+			return common.NewErrorResponse(err, http.StatusBadRequest, componentName, "PutConceptDescriptionById", "BadRequest"), nil
+		case common.IsErrDenied(err):
+			return common.NewErrorResponse(err, http.StatusForbidden, componentName, "PutConceptDescriptionById", "Denied"), nil
+		default:
+			return common.NewErrorResponse(err, http.StatusInternalServerError, componentName, "PutConceptDescriptionById", "Unhandled"), nil
+		}
+	}
+
+	if isUpdate {
+		return model.Response(http.StatusNoContent, nil), nil
+	}
+
+	jsonable, toJsonErr := jsonization.ToJsonable(conceptDescription)
+	if toJsonErr != nil {
+		return common.NewErrorResponse(toJsonErr, http.StatusInternalServerError, componentName, "PutConceptDescriptionById", "ToJsonable"), nil
+	}
+
+	return model.Response(http.StatusCreated, jsonable), nil
+}
+
+// DeleteConceptDescriptionById - Deletes a Concept Description
+func (s *ConceptDescriptionRepositoryAPIAPIService) DeleteConceptDescriptionById(ctx context.Context, cdIdentifier string) (model.ImplResponse, error) {
+	decodedIdentifier, err := common.DecodeAPIIdentifier(cdIdentifier)
+	if err != nil {
+		return common.NewErrorResponse(err, http.StatusBadRequest, componentName, "DeleteConceptDescriptionById", "URLDecode"), nil
+	}
+	err = s.d.DeleteConceptDescription(ctx, string(decodedIdentifier))
+	if err != nil {
+		switch {
+		case common.IsErrBadRequest(err):
+			return common.NewErrorResponse(err, http.StatusBadRequest, componentName, "DeleteConceptDescriptionById", "BadRequest"), nil
+		case common.IsErrDenied(err):
+			return common.NewErrorResponse(err, http.StatusForbidden, componentName, "DeleteConceptDescriptionById", "Denied"), nil
+		case common.IsErrNotFound(err):
+			return common.NewErrorResponse(err, http.StatusNotFound, componentName, "DeleteConceptDescriptionById", "NotFound"), nil
+		default:
+			return common.NewErrorResponse(err, http.StatusInternalServerError, componentName, "DeleteConceptDescriptionById", "Unhandled"), nil
+		}
+	}
+
+	return model.Response(http.StatusNoContent, nil), nil
+}
+
+func decodeConceptDescriptionReferenceSelectors(isCaseOf, dataSpecificationRef string) ([]auth.ReferenceSelector, error) {
+	selectors := make([]auth.ReferenceSelector, 0, 2)
+	for _, parameter := range []struct {
+		value string
+		field grammar.ModelStringPattern
+	}{
+		{isCaseOf, "$cd#isCaseOf"}, {dataSpecificationRef, "$cd#embeddedDataSpecifications.dataSpecification"},
+	} {
+		if parameter.value == "" {
+			continue
+		}
+		reference, err := common.DecodeAPIReference(parameter.value, 0)
+		if err != nil {
+			return nil, err
+		}
+		selectors = append(selectors, auth.ReferenceSelector{Field: parameter.field, Reference: reference})
+	}
+
+	return selectors, nil
+}

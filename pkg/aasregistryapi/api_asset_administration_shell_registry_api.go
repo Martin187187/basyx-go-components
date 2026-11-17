@@ -5,20 +5,27 @@
  *
  * The Full Profile of the Asset Administration Shell Registry Service Specification as part of the [Specification of the Asset Administration Shell: Part 2](https://industrialdigitaltwin.org/en/content-hub/aasspecifications).   Copyright: Industrial Digital Twin Association (IDTA) 2025
  *
- * API version: V3.1.1_SSP-001
+ * API version: V3.2.0
  * Contact: info@idtwin.org
  */
 
 package apis
 
 import (
-    "encoding/json"
-    "log"
-    "net/http"
-    "strings"
+	"context"
+	"encoding/json"
+	"errors"
+
+	"io"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
 
 	"github.com/eclipse-basyx/basyx-go-components/internal/common"
 	"github.com/eclipse-basyx/basyx-go-components/internal/common/model"
+	"github.com/eclipse-basyx/basyx-go-components/internal/common/model/grammar"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -121,6 +128,12 @@ func (c *AssetAdministrationShellRegistryAPIAPIController) Routes() Routes {
 			"/shell-descriptors/{aasIdentifier}/submodel-descriptors/{submodelIdentifier}",
 			c.DeleteSubmodelDescriptorByIdThroughSuperpath,
 		},
+		"QueryAssetAdministrationShellDescriptors": Route{
+			"QueryAssetAdministrationShellDescriptors",
+			strings.ToUpper("Post"),
+			"/query/shell-descriptors",
+			c.QueryAssetAdministrationShellDescriptors,
+		},
 	}
 }
 
@@ -187,77 +200,97 @@ func (c *AssetAdministrationShellRegistryAPIAPIController) OrderedRoutes() []Rou
 			"/shell-descriptors/{aasIdentifier}/submodel-descriptors/{submodelIdentifier}",
 			c.DeleteSubmodelDescriptorByIdThroughSuperpath,
 		},
+		Route{
+			"QueryAssetAdministrationShellDescriptors",
+			strings.ToUpper("Post"),
+			"/query/shell-descriptors",
+			c.QueryAssetAdministrationShellDescriptors,
+		},
 	}
 }
 
 // GetAllAssetAdministrationShellDescriptors - Returns all Asset Administration Shell Descriptors
 func (c *AssetAdministrationShellRegistryAPIAPIController) GetAllAssetAdministrationShellDescriptors(w http.ResponseWriter, r *http.Request) {
-    query, err := parseQuery(r.URL.RawQuery)
-    if err != nil {
-        log.Printf("🧩 [%s] Error in GetAllAssetAdministrationShellDescriptors: parse query raw=%q: %v", componentName, r.URL.RawQuery, err)
-        result := common.NewErrorResponse(
-            err,
-            http.StatusBadRequest,
-            componentName,
-            "GetAllAssetAdministrationShellDescriptors",
-            "query",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
-	var limitParam int32
-	if query.Has("limit") {
-		param, err := parseNumericParameter[int32](
-			query.Get("limit"),
-			WithParse[int32](parseInt32),
-			WithMinimum[int32](1),
+	query, err := parseQuery(r.URL.RawQuery)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "AAS descriptor query parameter parsing failed", "error.code", "AASREGISTRYAPI-GETALLASSETADMINISTRATIONSHELLDESCRIPTORS-PARSEQUERY", "error", err)
+		result := common.NewErrorResponse(
+			err,
+			http.StatusBadRequest,
+			componentName,
+			"GetAllAssetAdministrationShellDescriptors",
+			"query",
 		)
-        if err != nil {
-            log.Printf("🧩 [%s] Error in GetAllAssetAdministrationShellDescriptors: parse limit=%q: %v", componentName, query.Get("limit"), err)
-            result := common.NewErrorResponse(
-                err,
-                http.StatusBadRequest,
-                componentName,
-                "GetAllAssetAdministrationShellDescriptors",
-                "limit",
-            )
-            EncodeJSONResponse(result.Body, &result.Code, w)
-            return
-        }
-        limitParam = param
-    }
-	var cursorParam string
-	if query.Has("cursor") {
-		cursorParam = query.Get("cursor")
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
 	}
-	var assetKindParam model.AssetKind
-	if query.Has("assetKind") {
-		assetKindParam = model.AssetKind(query.Get("assetKind"))
-        if err := model.AssertAssetKindConstraints(assetKindParam); err != nil {
-            log.Printf("🧩 [%s] Error in GetAllAssetAdministrationShellDescriptors: invalid assetKind=%q: %v", componentName, string(assetKindParam), err)
-            result := common.NewErrorResponse(
-                err,
-                http.StatusBadRequest,
-                componentName,
-                "GetAllAssetAdministrationShellDescriptors",
-                "InvalidAssetKind",
-            )
-            EncodeJSONResponse(result.Body, &result.Code, w)
-            return
-        }
-    }
+	limitParam, paginationErr := common.ParseAPILimit(r.Context(), query)
+	if paginationErr != nil {
+		result := common.NewErrorResponse(paginationErr, http.StatusBadRequest, componentName, "GetAllAssetAdministrationShellDescriptors", "limit")
+		_ = EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
+	cursorParam, paginationErr := common.ParseAPICursor(query)
+	if paginationErr != nil {
+		result := common.NewErrorResponse(paginationErr, http.StatusBadRequest, componentName, "GetAllAssetAdministrationShellDescriptors", "cursor")
+		_ = EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
+	assetKindParam, assetKindErrResponse := parseOptionalAssetKind(r.Context(), query, "GetAllAssetAdministrationShellDescriptors")
+	if assetKindErrResponse != nil {
+		EncodeJSONResponse(assetKindErrResponse.Body, &assetKindErrResponse.Code, w)
+		return
+	}
+	if parameterErr := common.ValidateAPIEncodedQuery(query, "assetType", 2048); parameterErr != nil {
+		result := common.NewErrorResponse(parameterErr, http.StatusBadRequest, componentName, "GetAllAssetAdministrationShellDescriptors", "assetType")
+		_ = EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
 	var assetTypeParam string
 	if query.Has("assetType") {
 		assetTypeParam = query.Get("assetType")
 	}
+	assetIdsParam := query["assetIds"]
+	var createdFromParam time.Time
+	if query.Has("createdFrom") {
+		createdFromParam, err = parseTime(query.Get("createdFrom"))
+		if err != nil {
+			result := common.NewErrorResponse(err, http.StatusBadRequest, componentName, "GetAllAssetAdministrationShellDescriptors", "createdFrom")
+			EncodeJSONResponse(result.Body, &result.Code, w)
+			return
+		}
+	}
 
-    result, err := c.service.GetAllAssetAdministrationShellDescriptors(r.Context(), limitParam, cursorParam, assetKindParam, assetTypeParam)
-    if err != nil {
-        log.Printf("🧩 [%s] Error in GetAllAssetAdministrationShellDescriptors: service failure (limit=%d cursor=%q assetKind=%q assetType=%q): %v", componentName, limitParam, cursorParam, string(assetKindParam), assetTypeParam, err)
-        c.errorHandler(w, r, err, &result)
-        return
-    }
+	var updatedFromParam time.Time
+	if query.Has("updatedFrom") {
+		updatedFromParam, err = parseTime(query.Get("updatedFrom"))
+		if err != nil {
+			result := common.NewErrorResponse(err, http.StatusBadRequest, componentName, "GetAllAssetAdministrationShellDescriptors", "updatedFrom")
+			EncodeJSONResponse(result.Body, &result.Code, w)
+			return
+		}
+	}
+
+	result, err := c.service.GetAllAssetAdministrationShellDescriptors(r.Context(), limitParam, cursorParam, assetKindParam, assetTypeParam, assetIdsParam, createdFromParam, updatedFromParam)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "Error in GetAllAssetAdministrationShellDescriptors: service failure", "error.code", "AASREGISTRYAPI-GETALLASSETADMINISTRATIONSHELLDESCRIPTORS-EXECUTESERVICE", "error", err, "component", componentName, "limit_param", limitParam, "cursor_param", cursorParam, "asset_kind_param", string(assetKindParam), "asset_type_param", assetTypeParam)
+		c.errorHandler(w, r, err, &result)
+		return
+	}
 	_ = EncodeJSONResponse(result.Body, &result.Code, w)
+}
+
+func parseOptionalAssetKind(ctx context.Context, query url.Values, operation string) (model.AssetKind, *model.ImplResponse) {
+	if !query.Has("assetKind") {
+		return "", nil
+	}
+	assetKind := model.AssetKind(query.Get("assetKind"))
+	if err := model.AssertAssetKindConstraints(assetKind); err != nil {
+		slog.ErrorContext(ctx, "Error in operation: invalid assetKind", "error.code", "AASREGISTRYAPI-PARSEOPTIONALASSETKIND-VALIDATE", "error", err, "component", componentName, "operation", operation, "asset_kind", string(assetKind))
+		result := common.NewErrorResponse(err, http.StatusBadRequest, componentName, operation, "InvalidAssetKind")
+		return "", &result
+	}
+	return assetKind, nil
 }
 
 // PostAssetAdministrationShellDescriptor - Creates a new Asset Administration Shell Descriptor, i.e. registers an AAS
@@ -265,161 +298,174 @@ func (c *AssetAdministrationShellRegistryAPIAPIController) PostAssetAdministrati
 	var assetAdministrationShellDescriptorParam model.AssetAdministrationShellDescriptor
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
-    if err := d.Decode(&assetAdministrationShellDescriptorParam); err != nil {
-        log.Printf("🧩 [%s] Error in PostAssetAdministrationShellDescriptor: decode body: %v", componentName, err)
-        result := common.NewErrorResponse(
-            err,
-            http.StatusBadRequest,
-            componentName,
-            "PostAssetAdministrationShellDescriptor",
-            "RequestBody",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
+	if err := d.Decode(&assetAdministrationShellDescriptorParam); err != nil {
+		slog.ErrorContext(r.Context(), "Error in PostAssetAdministrationShellDescriptor: decode body", "error.code", "AASREGISTRYAPI-POSTASSETADMINISTRATIONSHELLDESCRIPTOR-DECODEBODY", "error", err, "component", componentName)
+		result := common.NewErrorResponse(
+			err,
+			http.StatusBadRequest,
+			componentName,
+			"PostAssetAdministrationShellDescriptor",
+			"RequestBody",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
 
-    if err := model.AssertAssetAdministrationShellDescriptorRequired(assetAdministrationShellDescriptorParam); err != nil {
-        log.Printf("🧩 [%s] Error in PostAssetAdministrationShellDescriptor: required validation failed: %v", componentName, err)
-        result := common.NewErrorResponse(
-            err,
-            http.StatusBadRequest,
-            componentName,
-            "PostAssetAdministrationShellDescriptor",
-            "RequestBody",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
-    if err := model.AssertAssetAdministrationShellDescriptorConstraints(assetAdministrationShellDescriptorParam); err != nil {
-        log.Printf("🧩 [%s] Error in PostAssetAdministrationShellDescriptor: constraints validation failed: %v", componentName, err)
-        result := common.NewErrorResponse(
-            err,
-            http.StatusBadRequest,
-            componentName,
-            "PostAssetAdministrationShellDescriptor",
-            "RequestBody",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
+	if err := model.AssertAssetAdministrationShellDescriptorRequired(assetAdministrationShellDescriptorParam); err != nil {
+		slog.ErrorContext(r.Context(), "Error in PostAssetAdministrationShellDescriptor: required validation failed", "error.code", "AASREGISTRYAPI-POSTASSETADMINISTRATIONSHELLDESCRIPTOR-VALIDATEREQUIRED", "error", err, "component", componentName)
+		result := common.NewErrorResponse(
+			err,
+			http.StatusBadRequest,
+			componentName,
+			"PostAssetAdministrationShellDescriptor",
+			"RequestBody",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
+	if err := model.AssertAssetAdministrationShellDescriptorConstraints(assetAdministrationShellDescriptorParam); err != nil {
+		slog.ErrorContext(r.Context(), "Error in PostAssetAdministrationShellDescriptor: constraints validation failed", "error.code", "AASREGISTRYAPI-POSTASSETADMINISTRATIONSHELLDESCRIPTOR-VALIDATECONSTRAINTS", "error", err, "component", componentName)
+		result := common.NewErrorResponse(
+			err,
+			http.StatusBadRequest,
+			componentName,
+			"PostAssetAdministrationShellDescriptor",
+			"RequestBody",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
 	result, err := c.service.PostAssetAdministrationShellDescriptor(r.Context(), assetAdministrationShellDescriptorParam)
-    if err != nil {
-        log.Printf("🧩 [%s] Error in PostAssetAdministrationShellDescriptor: service failure (bodyId=%q): %v", componentName, assetAdministrationShellDescriptorParam.Id, err)
-        c.errorHandler(w, r, err, &result)
-        return
-    }
+	if err != nil {
+		slog.ErrorContext(r.Context(), "Error in PostAssetAdministrationShellDescriptor: service failure", "error.code", "AASREGISTRYAPI-POSTASSETADMINISTRATIONSHELLDESCRIPTOR-EXECUTESERVICE", "error", err, "component", componentName)
+		c.errorHandler(w, r, err, &result)
+		return
+	}
+
+	if result.Code == http.StatusCreated {
+		location := c.buildAASDescriptorLocationFromRawId(r, assetAdministrationShellDescriptorParam.Id)
+		if location != "" {
+			w.Header().Set("Location", location)
+		}
+	}
 	_ = EncodeJSONResponse(result.Body, &result.Code, w)
 }
 
 // GetAssetAdministrationShellDescriptorById - Returns a specific Asset Administration Shell Descriptor
 func (c *AssetAdministrationShellRegistryAPIAPIController) GetAssetAdministrationShellDescriptorById(w http.ResponseWriter, r *http.Request) {
-
 	aasIdentifierParam := chi.URLParam(r, "aasIdentifier")
-    if aasIdentifierParam == "" {
-        log.Printf("🧩 [%s] Error in GetAssetAdministrationShellDescriptorById: missing path parameter aasIdentifier", componentName)
-        result := common.NewErrorResponse(
-            common.NewErrBadRequest("Missing path parameter 'aasIdentifier'"),
-            http.StatusBadRequest,
-            componentName,
-            "GetAssetAdministrationShellDescriptorById",
-            "aasIdentifier",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
+	if aasIdentifierParam == "" {
+		slog.ErrorContext(r.Context(), "Error in GetAssetAdministrationShellDescriptorById: missing path parameter aasIdentifier", "error.code", "AASREGISTRYAPI-GETASSETADMINISTRATIONSHELLDESCRIPTORBYID-VALIDATEPATH", "component", componentName)
+		result := common.NewErrorResponse(
+			common.NewErrBadRequest("Missing path parameter 'aasIdentifier'"),
+			http.StatusBadRequest,
+			componentName,
+			"GetAssetAdministrationShellDescriptorById",
+			"aasIdentifier",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
 	result, err := c.service.GetAssetAdministrationShellDescriptorById(r.Context(), aasIdentifierParam)
-    if err != nil {
-        log.Printf("🧩 [%s] Error in GetAssetAdministrationShellDescriptorById: service failure (aasIdentifier=%q): %v", componentName, aasIdentifierParam, err)
-        c.errorHandler(w, r, err, &result)
-        return
-    }
+	if err != nil {
+		slog.ErrorContext(r.Context(), "Error in GetAssetAdministrationShellDescriptorById: service failure", "error.code", "AASREGISTRYAPI-GETASSETADMINISTRATIONSHELLDESCRIPTORBYID-EXECUTESERVICE", "error", err, "component", componentName, "aas_identifier_param", aasIdentifierParam)
+		c.errorHandler(w, r, err, &result)
+		return
+	}
 	_ = EncodeJSONResponse(result.Body, &result.Code, w)
 }
 
 // PutAssetAdministrationShellDescriptorById - Creates or updates an existing Asset Administration Shell Descriptor
 func (c *AssetAdministrationShellRegistryAPIAPIController) PutAssetAdministrationShellDescriptorById(w http.ResponseWriter, r *http.Request) {
 	aasIdentifierParam := chi.URLParam(r, "aasIdentifier")
-    if aasIdentifierParam == "" {
-        log.Printf("🧩 [%s] Error in PutAssetAdministrationShellDescriptorById: missing path parameter aasIdentifier", componentName)
-        result := common.NewErrorResponse(
-            common.NewErrBadRequest("Missing path parameter 'aasIdentifier'"),
-            http.StatusBadRequest,
-            componentName,
-            "PutAssetAdministrationShellDescriptorById",
-            "aasIdentifier",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
+	if aasIdentifierParam == "" {
+		slog.ErrorContext(r.Context(), "Error in PutAssetAdministrationShellDescriptorById: missing path parameter aasIdentifier", "error.code", "AASREGISTRYAPI-PUTASSETADMINISTRATIONSHELLDESCRIPTORBYID-VALIDATEPATH", "component", componentName)
+		result := common.NewErrorResponse(
+			common.NewErrBadRequest("Missing path parameter 'aasIdentifier'"),
+			http.StatusBadRequest,
+			componentName,
+			"PutAssetAdministrationShellDescriptorById",
+			"aasIdentifier",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
 	var assetAdministrationShellDescriptorParam model.AssetAdministrationShellDescriptor
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
-    if err := d.Decode(&assetAdministrationShellDescriptorParam); err != nil {
-        log.Printf("🧩 [%s] Error in PutAssetAdministrationShellDescriptorById: decode body: %v", componentName, err)
-        result := common.NewErrorResponse(
-            err,
-            http.StatusBadRequest,
-            componentName,
-            "PutAssetAdministrationShellDescriptorById",
-            "RequestBody",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
-    if err := model.AssertAssetAdministrationShellDescriptorRequired(assetAdministrationShellDescriptorParam); err != nil {
-        log.Printf("🧩 [%s] Error in PutAssetAdministrationShellDescriptorById: required validation failed: %v", componentName, err)
-        result := common.NewErrorResponse(
-            err,
-            http.StatusBadRequest,
-            componentName,
-            "PutAssetAdministrationShellDescriptorById",
-            "RequestBody",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
-    if err := model.AssertAssetAdministrationShellDescriptorConstraints(assetAdministrationShellDescriptorParam); err != nil {
-        log.Printf("🧩 [%s] Error in PutAssetAdministrationShellDescriptorById: constraints validation failed: %v", componentName, err)
-        result := common.NewErrorResponse(
-            err,
-            http.StatusBadRequest,
-            componentName,
-            "PutAssetAdministrationShellDescriptorById",
-            "RequestBody",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
+	if err := d.Decode(&assetAdministrationShellDescriptorParam); err != nil {
+		slog.ErrorContext(r.Context(), "Error in PutAssetAdministrationShellDescriptorById: decode body", "error.code", "AASREGISTRYAPI-PUTASSETADMINISTRATIONSHELLDESCRIPTORBYID-DECODEBODY", "error", err, "component", componentName)
+		result := common.NewErrorResponse(
+			err,
+			http.StatusBadRequest,
+			componentName,
+			"PutAssetAdministrationShellDescriptorById",
+			"RequestBody",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
+	if err := model.AssertAssetAdministrationShellDescriptorRequired(assetAdministrationShellDescriptorParam); err != nil {
+		slog.ErrorContext(r.Context(), "Error in PutAssetAdministrationShellDescriptorById: required validation failed", "error.code", "AASREGISTRYAPI-PUTASSETADMINISTRATIONSHELLDESCRIPTORBYID-VALIDATEREQUIRED", "error", err, "component", componentName)
+		result := common.NewErrorResponse(
+			err,
+			http.StatusBadRequest,
+			componentName,
+			"PutAssetAdministrationShellDescriptorById",
+			"RequestBody",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
+	if err := model.AssertAssetAdministrationShellDescriptorConstraints(assetAdministrationShellDescriptorParam); err != nil {
+		slog.ErrorContext(r.Context(), "Error in PutAssetAdministrationShellDescriptorById: constraints validation failed", "error.code", "AASREGISTRYAPI-PUTASSETADMINISTRATIONSHELLDESCRIPTORBYID-VALIDATECONSTRAINTS", "error", err, "component", componentName)
+		result := common.NewErrorResponse(
+			err,
+			http.StatusBadRequest,
+			componentName,
+			"PutAssetAdministrationShellDescriptorById",
+			"RequestBody",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
 	result, err := c.service.PutAssetAdministrationShellDescriptorById(r.Context(), aasIdentifierParam, assetAdministrationShellDescriptorParam)
-    if err != nil {
-        log.Printf("🧩 [%s] Error in PutAssetAdministrationShellDescriptorById: service failure (aasIdentifier=%q bodyId=%q): %v", componentName, aasIdentifierParam, assetAdministrationShellDescriptorParam.Id, err)
-        c.errorHandler(w, r, err, &result)
-        return
-    }
+	if err != nil {
+		slog.ErrorContext(r.Context(), "Error in PutAssetAdministrationShellDescriptorById: service failure", "error.code", "AASREGISTRYAPI-PUTASSETADMINISTRATIONSHELLDESCRIPTORBYID-EXECUTESERVICE", "error", err, "component", componentName, "aas_identifier_param", aasIdentifierParam)
+		c.errorHandler(w, r, err, &result)
+		return
+	}
+
+	if result.Code == http.StatusCreated {
+		location := c.buildAASDescriptorLocationFromEncodedIdentifier(r, aasIdentifierParam)
+		if location != "" {
+			w.Header().Set("Location", location)
+		}
+	}
 	_ = EncodeJSONResponse(result.Body, &result.Code, w)
 }
 
 // DeleteAssetAdministrationShellDescriptorById - Deletes an Asset Administration Shell Descriptor, i.e. de-registers an AAS
 func (c *AssetAdministrationShellRegistryAPIAPIController) DeleteAssetAdministrationShellDescriptorById(w http.ResponseWriter, r *http.Request) {
 	aasIdentifierParam := chi.URLParam(r, "aasIdentifier")
-    if aasIdentifierParam == "" {
-        log.Printf("🧩 [%s] Error in DeleteAssetAdministrationShellDescriptorById: missing path parameter aasIdentifier", componentName)
-        result := common.NewErrorResponse(
-            common.NewErrBadRequest("Missing path parameter 'aasIdentifier'"),
-            http.StatusBadRequest,
-            componentName,
-            "DeleteAssetAdministrationShellDescriptorById",
-            "aasIdentifier",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
+	if aasIdentifierParam == "" {
+		slog.ErrorContext(r.Context(), "Error in DeleteAssetAdministrationShellDescriptorById: missing path parameter aasIdentifier", "error.code", "AASREGISTRYAPI-DELETEASSETADMINISTRATIONSHELLDESCRIPTORBYID-VALIDATEPATH", "component", componentName)
+		result := common.NewErrorResponse(
+			common.NewErrBadRequest("Missing path parameter 'aasIdentifier'"),
+			http.StatusBadRequest,
+			componentName,
+			"DeleteAssetAdministrationShellDescriptorById",
+			"aasIdentifier",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
 	result, err := c.service.DeleteAssetAdministrationShellDescriptorById(r.Context(), aasIdentifierParam)
-    if err != nil {
-        log.Printf("🧩 [%s] Error in DeleteAssetAdministrationShellDescriptorById: service failure (aasIdentifier=%q): %v", componentName, aasIdentifierParam, err)
-        c.errorHandler(w, r, err, &result)
-        return
-    }
+	if err != nil {
+		slog.ErrorContext(r.Context(), "Error in DeleteAssetAdministrationShellDescriptorById: service failure", "error.code", "AASREGISTRYAPI-DELETEASSETADMINISTRATIONSHELLDESCRIPTORBYID-EXECUTESERVICE", "error", err, "component", componentName, "aas_identifier_param", aasIdentifierParam)
+		c.errorHandler(w, r, err, &result)
+		return
+	}
 	_ = EncodeJSONResponse(result.Body, &result.Code, w)
 }
 
@@ -449,248 +495,327 @@ func (c *AssetAdministrationShellRegistryAPIAPIController) GetAllSubmodelDescrip
 		EncodeJSONResponse(result.Body, &result.Code, w)
 		return
 	}
-	var limitParam int32
-	if query.Has("limit") {
-		param, err := parseNumericParameter[int32](
-			query.Get("limit"),
-			WithParse[int32](parseInt32),
-			WithMinimum[int32](1),
-		)
-		if err != nil {
-			result := common.NewErrorResponse(
-				err,
-				http.StatusBadRequest,
-				componentName,
-				"GetAllSubmodelDescriptorsThroughSuperpath",
-				"limit",
-			)
-			EncodeJSONResponse(result.Body, &result.Code, w)
-			return
-		}
-		limitParam = param
+	limitParam, paginationErr := common.ParseAPILimit(r.Context(), query)
+	if paginationErr != nil {
+		result := common.NewErrorResponse(paginationErr, http.StatusBadRequest, componentName, "GetAllSubmodelDescriptorsThroughSuperpath", "limit")
+		_ = EncodeJSONResponse(result.Body, &result.Code, w)
+		return
 	}
-	var cursorParam string
-	if query.Has("cursor") {
-		cursorParam = query.Get("cursor")
+	cursorParam, paginationErr := common.ParseAPICursor(query)
+	if paginationErr != nil {
+		result := common.NewErrorResponse(paginationErr, http.StatusBadRequest, componentName, "GetAllSubmodelDescriptorsThroughSuperpath", "cursor")
+		_ = EncodeJSONResponse(result.Body, &result.Code, w)
+		return
 	}
 	result, err := c.service.GetAllSubmodelDescriptorsThroughSuperpath(r.Context(), aasIdentifierParam, limitParam, cursorParam)
-    if err != nil {
-        log.Printf("🧩 [%s] Error in GetAllSubmodelDescriptorsThroughSuperpath: service failure (aasIdentifier=%q limit=%d cursor=%q): %v", componentName, aasIdentifierParam, limitParam, cursorParam, err)
-        c.errorHandler(w, r, err, &result)
-        return
-    }
+	if err != nil {
+		slog.ErrorContext(r.Context(), "Error in GetAllSubmodelDescriptorsThroughSuperpath: service failure", "error.code", "AASREGISTRYAPI-GETALLSUBMODELDESCRIPTORSTHROUGHSUPERPATH-EXECUTESERVICE", "error", err, "component", componentName, "aas_identifier_param", aasIdentifierParam, "limit_param", limitParam, "cursor_param", cursorParam)
+		c.errorHandler(w, r, err, &result)
+		return
+	}
 	_ = EncodeJSONResponse(result.Body, &result.Code, w)
 }
 
 // PostSubmodelDescriptorThroughSuperpath - Creates a new Submodel Descriptor, i.e. registers a submodel
 func (c *AssetAdministrationShellRegistryAPIAPIController) PostSubmodelDescriptorThroughSuperpath(w http.ResponseWriter, r *http.Request) {
 	aasIdentifierParam := chi.URLParam(r, "aasIdentifier")
-    if aasIdentifierParam == "" {
-        log.Printf("🧩 [%s] Error in PostSubmodelDescriptorThroughSuperpath: missing path parameter aasIdentifier", componentName)
-        result := common.NewErrorResponse(
-            common.NewErrBadRequest("Missing path parameter 'aasIdentifier'"),
-            http.StatusBadRequest,
-            componentName,
-            "PostSubmodelDescriptorThroughSuperpath",
-            "aasIdentifier",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
+	if aasIdentifierParam == "" {
+		slog.ErrorContext(r.Context(), "Error in PostSubmodelDescriptorThroughSuperpath: missing path parameter aasIdentifier", "error.code", "AASREGISTRYAPI-POSTSUBMODELDESCRIPTORTHROUGHSUPERPATH-VALIDATEPATH", "component", componentName)
+		result := common.NewErrorResponse(
+			common.NewErrBadRequest("Missing path parameter 'aasIdentifier'"),
+			http.StatusBadRequest,
+			componentName,
+			"PostSubmodelDescriptorThroughSuperpath",
+			"aasIdentifier",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
 	var submodelDescriptorParam model.SubmodelDescriptor
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
-    if err := d.Decode(&submodelDescriptorParam); err != nil {
-        log.Printf("🧩 [%s] Error in PostSubmodelDescriptorThroughSuperpath: decode body: %v", componentName, err)
-        result := common.NewErrorResponse(
-            err,
-            http.StatusBadRequest,
-            componentName,
-            "PostSubmodelDescriptorThroughSuperpath",
-            "RequestBody",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
-    if err := model.AssertSubmodelDescriptorRequired(submodelDescriptorParam); err != nil {
-        log.Printf("🧩 [%s] Error in PostSubmodelDescriptorThroughSuperpath: required validation failed: %v", componentName, err)
-        result := common.NewErrorResponse(
-            err,
-            http.StatusBadRequest,
-            componentName,
-            "PostSubmodelDescriptorThroughSuperpath",
-            "RequestBody",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
-    if err := model.AssertSubmodelDescriptorConstraints(submodelDescriptorParam); err != nil {
-        log.Printf("🧩 [%s] Error in PostSubmodelDescriptorThroughSuperpath: constraints validation failed: %v", componentName, err)
-        result := common.NewErrorResponse(
-            err,
-            http.StatusBadRequest,
-            componentName,
-            "PostSubmodelDescriptorThroughSuperpath",
-            "RequestBody",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
+	if err := d.Decode(&submodelDescriptorParam); err != nil {
+		slog.ErrorContext(r.Context(), "Error in PostSubmodelDescriptorThroughSuperpath: decode body", "error.code", "AASREGISTRYAPI-POSTSUBMODELDESCRIPTORTHROUGHSUPERPATH-DECODEBODY", "error", err, "component", componentName)
+		result := common.NewErrorResponse(
+			err,
+			http.StatusBadRequest,
+			componentName,
+			"PostSubmodelDescriptorThroughSuperpath",
+			"RequestBody",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
+	if err := model.AssertSubmodelDescriptorRequired(submodelDescriptorParam); err != nil {
+		slog.ErrorContext(r.Context(), "Error in PostSubmodelDescriptorThroughSuperpath: required validation failed", "error.code", "AASREGISTRYAPI-POSTSUBMODELDESCRIPTORTHROUGHSUPERPATH-VALIDATEREQUIRED", "error", err, "component", componentName)
+		result := common.NewErrorResponse(
+			err,
+			http.StatusBadRequest,
+			componentName,
+			"PostSubmodelDescriptorThroughSuperpath",
+			"RequestBody",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
+	if err := model.AssertSubmodelDescriptorConstraints(submodelDescriptorParam); err != nil {
+		slog.ErrorContext(r.Context(), "Error in PostSubmodelDescriptorThroughSuperpath: constraints validation failed", "error.code", "AASREGISTRYAPI-POSTSUBMODELDESCRIPTORTHROUGHSUPERPATH-VALIDATECONSTRAINTS", "error", err, "component", componentName)
+		result := common.NewErrorResponse(
+			err,
+			http.StatusBadRequest,
+			componentName,
+			"PostSubmodelDescriptorThroughSuperpath",
+			"RequestBody",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
 	result, err := c.service.PostSubmodelDescriptorThroughSuperpath(r.Context(), aasIdentifierParam, submodelDescriptorParam)
-    if err != nil {
-        log.Printf("🧩 [%s] Error in PostSubmodelDescriptorThroughSuperpath: service failure (aasIdentifier=%q bodyId=%q): %v", componentName, aasIdentifierParam, submodelDescriptorParam.Id, err)
-        c.errorHandler(w, r, err, &result)
-        return
-    }
+	if err != nil {
+		slog.ErrorContext(r.Context(), "Error in PostSubmodelDescriptorThroughSuperpath: service failure", "error.code", "AASREGISTRYAPI-POSTSUBMODELDESCRIPTORTHROUGHSUPERPATH-EXECUTESERVICE", "error", err, "component", componentName, "aas_identifier_param", aasIdentifierParam)
+		c.errorHandler(w, r, err, &result)
+		return
+	}
+
+	if result.Code == http.StatusCreated {
+		location := c.buildSubmodelDescriptorLocationFromRawId(r, aasIdentifierParam, submodelDescriptorParam.Id)
+		if location != "" {
+			w.Header().Set("Location", location)
+		}
+	}
 	_ = EncodeJSONResponse(result.Body, &result.Code, w)
 }
 
 // GetSubmodelDescriptorByIdThroughSuperpath - Returns a specific Submodel Descriptor
 func (c *AssetAdministrationShellRegistryAPIAPIController) GetSubmodelDescriptorByIdThroughSuperpath(w http.ResponseWriter, r *http.Request) {
 	aasIdentifierParam := chi.URLParam(r, "aasIdentifier")
-    if aasIdentifierParam == "" {
-        log.Printf("🧩 [%s] Error in GetSubmodelDescriptorByIdThroughSuperpath: missing path parameter aasIdentifier", componentName)
-        result := common.NewErrorResponse(
-            common.NewErrBadRequest("Missing path parameter 'aasIdentifier'"),
-            http.StatusBadRequest,
-            componentName,
-            "GetSubmodelDescriptorByIdThroughSuperpath",
-            "aasIdentifier",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
+	if aasIdentifierParam == "" {
+		slog.ErrorContext(r.Context(), "Error in GetSubmodelDescriptorByIdThroughSuperpath: missing path parameter aasIdentifier", "error.code", "AASREGISTRYAPI-GETSUBMODELDESCRIPTORBYIDTHROUGHSUPERPATH-VALIDATEPATH", "component", componentName)
+		result := common.NewErrorResponse(
+			common.NewErrBadRequest("Missing path parameter 'aasIdentifier'"),
+			http.StatusBadRequest,
+			componentName,
+			"GetSubmodelDescriptorByIdThroughSuperpath",
+			"aasIdentifier",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
 	submodelIdentifierParam := chi.URLParam(r, "submodelIdentifier")
-    if submodelIdentifierParam == "" {
-        log.Printf("🧩 [%s] Error in GetSubmodelDescriptorByIdThroughSuperpath: missing path parameter submodelIdentifier", componentName)
-        result := common.NewErrorResponse(
-            common.NewErrBadRequest("Missing path parameter 'submodelIdentifier'"),
-            http.StatusBadRequest,
-            componentName,
-            "GetSubmodelDescriptorByIdThroughSuperpath",
-            "submodelIdentifier",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
+	if submodelIdentifierParam == "" {
+		slog.ErrorContext(r.Context(), "Error in GetSubmodelDescriptorByIdThroughSuperpath: missing path parameter submodelIdentifier", "error.code", "AASREGISTRYAPI-GETSUBMODELDESCRIPTORBYIDTHROUGHSUPERPATH-VALIDATEPATH", "component", componentName)
+		result := common.NewErrorResponse(
+			common.NewErrBadRequest("Missing path parameter 'submodelIdentifier'"),
+			http.StatusBadRequest,
+			componentName,
+			"GetSubmodelDescriptorByIdThroughSuperpath",
+			"submodelIdentifier",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
 	result, err := c.service.GetSubmodelDescriptorByIdThroughSuperpath(r.Context(), aasIdentifierParam, submodelIdentifierParam)
-    if err != nil {
-        log.Printf("🧩 [%s] Error in GetSubmodelDescriptorByIdThroughSuperpath: service failure (aasIdentifier=%q submodelIdentifier=%q): %v", componentName, aasIdentifierParam, submodelIdentifierParam, err)
-        c.errorHandler(w, r, err, &result)
-        return
-    }
+	if err != nil {
+		slog.ErrorContext(r.Context(), "Error in GetSubmodelDescriptorByIdThroughSuperpath: service failure", "error.code", "AASREGISTRYAPI-GETSUBMODELDESCRIPTORBYIDTHROUGHSUPERPATH-EXECUTESERVICE", "error", err, "component", componentName, "aas_identifier_param", aasIdentifierParam, "submodel_identifier_param", submodelIdentifierParam)
+		c.errorHandler(w, r, err, &result)
+		return
+	}
 	_ = EncodeJSONResponse(result.Body, &result.Code, w)
 }
 
 // PutSubmodelDescriptorByIdThroughSuperpath - Creates or updates an existing Submodel Descriptor
 func (c *AssetAdministrationShellRegistryAPIAPIController) PutSubmodelDescriptorByIdThroughSuperpath(w http.ResponseWriter, r *http.Request) {
 	aasIdentifierParam := chi.URLParam(r, "aasIdentifier")
-    if aasIdentifierParam == "" {
-        log.Printf("🧩 [%s] Error in PutSubmodelDescriptorByIdThroughSuperpath: missing path parameter aasIdentifier", componentName)
-        result := common.NewErrorResponse(
-            common.NewErrBadRequest("Missing path parameter 'aasIdentifier'"),
-            http.StatusBadRequest,
-            componentName,
-            "PutSubmodelDescriptorByIdThroughSuperpath",
-            "aasIdentifier",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
+	if aasIdentifierParam == "" {
+		slog.ErrorContext(r.Context(), "Error in PutSubmodelDescriptorByIdThroughSuperpath: missing path parameter aasIdentifier", "error.code", "AASREGISTRYAPI-PUTSUBMODELDESCRIPTORBYIDTHROUGHSUPERPATH-VALIDATEPATH", "component", componentName)
+		result := common.NewErrorResponse(
+			common.NewErrBadRequest("Missing path parameter 'aasIdentifier'"),
+			http.StatusBadRequest,
+			componentName,
+			"PutSubmodelDescriptorByIdThroughSuperpath",
+			"aasIdentifier",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
 	submodelIdentifierParam := chi.URLParam(r, "submodelIdentifier")
-    if submodelIdentifierParam == "" {
-        log.Printf("🧩 [%s] Error in PutSubmodelDescriptorByIdThroughSuperpath: missing path parameter submodelIdentifier", componentName)
-        result := common.NewErrorResponse(
-            common.NewErrBadRequest("Missing path parameter 'submodelIdentifier'"),
-            http.StatusBadRequest,
-            componentName,
-            "PutSubmodelDescriptorByIdThroughSuperpath",
-            "submodelIdentifier",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
+	if submodelIdentifierParam == "" {
+		slog.ErrorContext(r.Context(), "Error in PutSubmodelDescriptorByIdThroughSuperpath: missing path parameter submodelIdentifier", "error.code", "AASREGISTRYAPI-PUTSUBMODELDESCRIPTORBYIDTHROUGHSUPERPATH-VALIDATEPATH", "component", componentName)
+		result := common.NewErrorResponse(
+			common.NewErrBadRequest("Missing path parameter 'submodelIdentifier'"),
+			http.StatusBadRequest,
+			componentName,
+			"PutSubmodelDescriptorByIdThroughSuperpath",
+			"submodelIdentifier",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
 	var submodelDescriptorParam model.SubmodelDescriptor
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
-    if err := d.Decode(&submodelDescriptorParam); err != nil {
-        log.Printf("🧩 [%s] Error in PutSubmodelDescriptorByIdThroughSuperpath: decode body: %v", componentName, err)
-        result := common.NewErrorResponse(
-            err,
-            http.StatusBadRequest,
-            componentName,
-            "PutSubmodelDescriptorByIdThroughSuperpath",
-            "RequestBody",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
-    if err := model.AssertSubmodelDescriptorRequired(submodelDescriptorParam); err != nil {
-        log.Printf("🧩 [%s] Error in PutSubmodelDescriptorByIdThroughSuperpath: required validation failed: %v", componentName, err)
-        result := common.NewErrorResponse(
-            err,
-            http.StatusBadRequest,
-            componentName,
-            "PutSubmodelDescriptorByIdThroughSuperpath",
-            "RequestBody",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
-    if err := model.AssertSubmodelDescriptorConstraints(submodelDescriptorParam); err != nil {
-        log.Printf("🧩 [%s] Error in PutSubmodelDescriptorByIdThroughSuperpath: constraints validation failed: %v", componentName, err)
-        result := common.NewErrorResponse(
-            err,
-            http.StatusBadRequest,
-            componentName,
-            "PutSubmodelDescriptorByIdThroughSuperpath",
-            "RequestBody",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
+	if err := d.Decode(&submodelDescriptorParam); err != nil {
+		slog.ErrorContext(r.Context(), "Error in PutSubmodelDescriptorByIdThroughSuperpath: decode body", "error.code", "AASREGISTRYAPI-PUTSUBMODELDESCRIPTORBYIDTHROUGHSUPERPATH-DECODEBODY", "error", err, "component", componentName)
+		result := common.NewErrorResponse(
+			err,
+			http.StatusBadRequest,
+			componentName,
+			"PutSubmodelDescriptorByIdThroughSuperpath",
+			"RequestBody",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
+	if err := model.AssertSubmodelDescriptorRequired(submodelDescriptorParam); err != nil {
+		slog.ErrorContext(r.Context(), "Error in PutSubmodelDescriptorByIdThroughSuperpath: required validation failed", "error.code", "AASREGISTRYAPI-PUTSUBMODELDESCRIPTORBYIDTHROUGHSUPERPATH-VALIDATEREQUIRED", "error", err, "component", componentName)
+		result := common.NewErrorResponse(
+			err,
+			http.StatusBadRequest,
+			componentName,
+			"PutSubmodelDescriptorByIdThroughSuperpath",
+			"RequestBody",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
+	if err := model.AssertSubmodelDescriptorConstraints(submodelDescriptorParam); err != nil {
+		slog.ErrorContext(r.Context(), "Error in PutSubmodelDescriptorByIdThroughSuperpath: constraints validation failed", "error.code", "AASREGISTRYAPI-PUTSUBMODELDESCRIPTORBYIDTHROUGHSUPERPATH-VALIDATECONSTRAINTS", "error", err, "component", componentName)
+		result := common.NewErrorResponse(
+			err,
+			http.StatusBadRequest,
+			componentName,
+			"PutSubmodelDescriptorByIdThroughSuperpath",
+			"RequestBody",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
 	result, err := c.service.PutSubmodelDescriptorByIdThroughSuperpath(r.Context(), aasIdentifierParam, submodelIdentifierParam, submodelDescriptorParam)
-    if err != nil {
-        log.Printf("🧩 [%s] Error in PutSubmodelDescriptorByIdThroughSuperpath: service failure (aasIdentifier=%q submodelIdentifier=%q bodyId=%q): %v", componentName, aasIdentifierParam, submodelIdentifierParam, submodelDescriptorParam.Id, err)
-        c.errorHandler(w, r, err, &result)
-        return
-    }
+	if err != nil {
+		slog.ErrorContext(r.Context(), "Error in PutSubmodelDescriptorByIdThroughSuperpath: service failure", "error.code", "AASREGISTRYAPI-PUTSUBMODELDESCRIPTORBYIDTHROUGHSUPERPATH-EXECUTESERVICE", "error", err, "component", componentName, "aas_identifier_param", aasIdentifierParam, "submodel_identifier_param", submodelIdentifierParam)
+		c.errorHandler(w, r, err, &result)
+		return
+	}
+
+	if result.Code == http.StatusCreated {
+		location := c.buildSubmodelDescriptorLocationFromEncodedIdentifier(r, aasIdentifierParam, submodelIdentifierParam)
+		if location != "" {
+			w.Header().Set("Location", location)
+		}
+	}
 	_ = EncodeJSONResponse(result.Body, &result.Code, w)
 }
 
 // DeleteSubmodelDescriptorByIdThroughSuperpath - Deletes a Submodel Descriptor, i.e. de-registers a submodel
 func (c *AssetAdministrationShellRegistryAPIAPIController) DeleteSubmodelDescriptorByIdThroughSuperpath(w http.ResponseWriter, r *http.Request) {
 	aasIdentifierParam := chi.URLParam(r, "aasIdentifier")
-    if aasIdentifierParam == "" {
-        log.Printf("🧩 [%s] Error in DeleteSubmodelDescriptorByIdThroughSuperpath: missing path parameter aasIdentifier", componentName)
-        result := common.NewErrorResponse(
-            common.NewErrBadRequest("Missing path parameter 'aasIdentifier'"),
-            http.StatusBadRequest,
-            componentName,
-            "DeleteSubmodelDescriptorByIdThroughSuperpath",
-            "aasIdentifier",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
+	if aasIdentifierParam == "" {
+		slog.ErrorContext(r.Context(), "Error in DeleteSubmodelDescriptorByIdThroughSuperpath: missing path parameter aasIdentifier", "error.code", "AASREGISTRYAPI-DELETESUBMODELDESCRIPTORBYIDTHROUGHSUPERPATH-VALIDATEPATH", "component", componentName)
+		result := common.NewErrorResponse(
+			common.NewErrBadRequest("Missing path parameter 'aasIdentifier'"),
+			http.StatusBadRequest,
+			componentName,
+			"DeleteSubmodelDescriptorByIdThroughSuperpath",
+			"aasIdentifier",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
 	submodelIdentifierParam := chi.URLParam(r, "submodelIdentifier")
-    if submodelIdentifierParam == "" {
-        log.Printf("🧩 [%s] Error in DeleteSubmodelDescriptorByIdThroughSuperpath: missing path parameter submodelIdentifier", componentName)
-        result := common.NewErrorResponse(
-            common.NewErrBadRequest("Missing path parameter 'submodelIdentifier'"),
-            http.StatusBadRequest,
-            componentName,
-            "DeleteSubmodelDescriptorByIdThroughSuperpath",
-            "submodelIdentifier",
-        )
-        EncodeJSONResponse(result.Body, &result.Code, w)
-        return
-    }
+	if submodelIdentifierParam == "" {
+		slog.ErrorContext(r.Context(), "Error in DeleteSubmodelDescriptorByIdThroughSuperpath: missing path parameter submodelIdentifier", "error.code", "AASREGISTRYAPI-DELETESUBMODELDESCRIPTORBYIDTHROUGHSUPERPATH-VALIDATEPATH", "component", componentName)
+		result := common.NewErrorResponse(
+			common.NewErrBadRequest("Missing path parameter 'submodelIdentifier'"),
+			http.StatusBadRequest,
+			componentName,
+			"DeleteSubmodelDescriptorByIdThroughSuperpath",
+			"submodelIdentifier",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
 	result, err := c.service.DeleteSubmodelDescriptorByIdThroughSuperpath(r.Context(), aasIdentifierParam, submodelIdentifierParam)
-    if err != nil {
-        log.Printf("🧩 [%s] Error in DeleteSubmodelDescriptorByIdThroughSuperpath: service failure (aasIdentifier=%q submodelIdentifier=%q): %v", componentName, aasIdentifierParam, submodelIdentifierParam, err)
-        c.errorHandler(w, r, err, &result)
-        return
-    }
+	if err != nil {
+		slog.ErrorContext(r.Context(), "Error in DeleteSubmodelDescriptorByIdThroughSuperpath: service failure", "error.code", "AASREGISTRYAPI-DELETESUBMODELDESCRIPTORBYIDTHROUGHSUPERPATH-EXECUTESERVICE", "error", err, "component", componentName, "aas_identifier_param", aasIdentifierParam, "submodel_identifier_param", submodelIdentifierParam)
+		c.errorHandler(w, r, err, &result)
+		return
+	}
+	_ = EncodeJSONResponse(result.Body, &result.Code, w)
+}
+
+// QueryAssetAdministrationShellDescriptors - Returns all Asset Administration Shell Descriptors that confirm to the input query
+func (c *AssetAdministrationShellRegistryAPIAPIController) QueryAssetAdministrationShellDescriptors(w http.ResponseWriter, r *http.Request) {
+	query, err := parseQuery(r.URL.RawQuery)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "AAS descriptor query parameter parsing failed", "error.code", "AASREGISTRYAPI-QUERYASSETADMINISTRATIONSHELLDESCRIPTORS-PARSEQUERY", "error", err)
+		result := common.NewErrorResponse(
+			err,
+			http.StatusBadRequest,
+			componentName,
+			"QueryAssetAdministrationShellDescriptors",
+			"query",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
+	limitParam, paginationErr := common.ParseAPILimit(r.Context(), query)
+	if paginationErr != nil {
+		result := common.NewErrorResponse(paginationErr, http.StatusBadRequest, componentName, "QueryAssetAdministrationShellDescriptors", "limit")
+		_ = EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
+	cursorParam, paginationErr := common.ParseAPICursor(query)
+	if paginationErr != nil {
+		result := common.NewErrorResponse(paginationErr, http.StatusBadRequest, componentName, "QueryAssetAdministrationShellDescriptors", "cursor")
+		_ = EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
+	var queryParam grammar.Query
+	d := json.NewDecoder(r.Body)
+	d.DisallowUnknownFields()
+	if err := d.Decode(&queryParam); err != nil && !errors.Is(err, io.EOF) {
+		slog.ErrorContext(r.Context(), "Error in QueryAssetAdministrationShellDescriptors: decode body", "error.code", "AASREGISTRYAPI-QUERYASSETADMINISTRATIONSHELLDESCRIPTORS-DECODEBODY", "error", err, "component", componentName)
+		result := common.NewErrorResponse(
+			err,
+			http.StatusBadRequest,
+			componentName,
+			"QueryAssetAdministrationShellDescriptors",
+			"RequestBody",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
+	if err := grammar.AssertQueryRequired(queryParam); err != nil {
+		slog.ErrorContext(r.Context(), "Error in QueryAssetAdministrationShellDescriptors: required validation failed", "error.code", "AASREGISTRYAPI-QUERYASSETADMINISTRATIONSHELLDESCRIPTORS-VALIDATEREQUIRED", "error", err, "component", componentName)
+		result := common.NewErrorResponse(
+			err,
+			http.StatusBadRequest,
+			componentName,
+			"QueryAssetAdministrationShellDescriptors",
+			"RequestBody",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
+	if err := grammar.AssertQueryConstraints(queryParam); err != nil {
+		slog.ErrorContext(r.Context(), "Error in QueryAssetAdministrationShellDescriptors: constraints validation failed", "error.code", "AASREGISTRYAPI-QUERYASSETADMINISTRATIONSHELLDESCRIPTORS-VALIDATECONSTRAINTS", "error", err, "component", componentName)
+		result := common.NewErrorResponse(
+			err,
+			http.StatusBadRequest,
+			componentName,
+			"QueryAssetAdministrationShellDescriptors",
+			"RequestBody",
+		)
+		EncodeJSONResponse(result.Body, &result.Code, w)
+		return
+	}
+	result, err := c.service.QueryAssetAdministrationShellDescriptors(r.Context(), limitParam, cursorParam, queryParam)
+	// If an error occurred, encode the error with the status code
+	if err != nil {
+		slog.ErrorContext(r.Context(), "Error in QueryAssetAdministrationShellDescriptors: service failure", "error.code", "AASREGISTRYAPI-QUERYASSETADMINISTRATIONSHELLDESCRIPTORS-EXECUTESERVICE", "error", err, "component", componentName, "limit_param", limitParam, "cursor_param", cursorParam)
+		c.errorHandler(w, r, err, &result)
+		return
+	}
+	// If no error, encode the body and the result code
 	_ = EncodeJSONResponse(result.Body, &result.Code, w)
 }
